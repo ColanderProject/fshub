@@ -1,0 +1,5 @@
+data_path: /home/medive/.fshub/
+listen_ip: localhost
+listen_port: 7303
+login_password: 8LL_BwDpGmRAmVvfvM5moOnEdrkvcxufEIW0tk-m9Jw
+require_password: true
