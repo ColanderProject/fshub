@@ -265,8 +265,12 @@
                         <input type="text" class="form-control" id="search-query" placeholder="Enter search term (use 'ends:xxx' or 'starts:xxx' for advanced search)">
                         <button class="btn btn-primary" id="search-btn">Search</button>
                     </div>
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="search-all-snapshots" checked>
+                        <label class="form-check-label" for="search-all-snapshots">Search all loaded snapshots</label>
+                    </div>
                 </div>
-                
+
                 <div id="search-results">
                     <h4>Search Results</h4>
                     <div id="search-results-content">
@@ -1133,25 +1137,32 @@
         // Perform search
         async function performSearch() {
             const query = document.getElementById('search-query').value;
-            
+            const searchAllSnapshots = document.getElementById('search-all-snapshots').checked;
+
             if (!query) {
                 alert('Please enter a search query');
                 return;
             }
-            
+
             try {
+                let snapshots = [];
+                if (!searchAllSnapshots && currentSnapshot) {
+                    snapshots = [currentSnapshot]; // Search in current snapshot only
+                }
+                // If searchAllSnapshots is true, we pass an empty array to search all loaded snapshots
+
                 const response = await fetch('/api/v1/search', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({ 
+                    body: JSON.stringify({
                         query: query,
-                        snapshots: [currentSnapshot] // Search in current snapshot only for now
+                        snapshots: snapshots
                     }),
                     credentials: 'same-origin'
                 });
-                
+
                 const data = await response.json();
                 
                 const resultsDiv = document.getElementById('search-results-content');

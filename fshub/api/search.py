@@ -6,11 +6,9 @@ import json
 import gzip
 from pathlib import Path
 from ..config import Config
+from .explorer import loaded_snapshots
 
 search_bp = Blueprint('search_bp', __name__)
-
-# Global variable for loaded snapshots
-loaded_snapshots = {}  # Key: filename, Value: {'data': list, 'index': dict, 'groups': dict}
 
 
 @search_bp.route('/api/v1/search', methods=['POST'])
@@ -28,7 +26,6 @@ def search_files():
     # If no specific snapshots provided, search all loaded snapshots
     if not snapshot_files:
         snapshot_files = list(loaded_snapshots.keys())
-    
     for snapshot_filename in snapshot_files:
         if snapshot_filename not in loaded_snapshots:
             # Try to load the snapshot
@@ -95,56 +92,3 @@ def search_files():
                     results.append(result)
     
     return jsonify({'results': results})
-
-
-def load_snapshot(snapshot_filename):
-    """Load a snapshot from file into memory"""
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
-    snapshot_path = os.path.join(snapshot_dir, snapshot_filename)
-    
-    if not os.path.exists(snapshot_path):
-        return False
-    
-    # Load the snapshot data
-    snapshot_data = []
-    with gzip.open(snapshot_path, 'rt', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                snapshot_data.append(json.loads(line))
-    
-    # Build an index for faster path lookups
-    path_index = {}
-    for i, path_obj in enumerate(snapshot_data):
-        path_index[path_obj['p']] = i
-    
-    # Load groups if they exist
-    base_name = snapshot_filename.replace('.jsonl.gz', '')
-    groups_filename = f"{base_name}_groups.jl"
-    groups_path = os.path.join(snapshot_dir, groups_filename)
-    
-    groups_dict = {}
-    if os.path.exists(groups_path):
-        with open(groups_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    action = json.loads(line)
-                    path, item_type, group_name, action_type, timestamp = action
-                    
-                    full_path = f"{item_type}:{path}"
-                    
-                    if group_name not in groups_dict:
-                        groups_dict[group_name] = set()
-                    
-                    if action_type == 'add':
-                        groups_dict[group_name].add(full_path)
-                    elif action_type == 'del':
-                        groups_dict[group_name].discard(full_path)
-    
-    loaded_snapshots[snapshot_filename] = {
-        'data': snapshot_data,
-        'index': path_index,
-        'groups': groups_dict
-    }
-    
-    return True
