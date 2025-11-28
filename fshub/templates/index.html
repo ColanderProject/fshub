@@ -169,6 +169,7 @@
                             <tr>
                                 <th>Name</th>
                                 <th>Type</th>
+                                <th>OS</th>
                                 <th>Host</th>
                                 <th>Model</th>
                                 <th>Storage</th>
@@ -178,10 +179,68 @@
                             <!-- Devices will be populated here -->
                         </tbody>
                     </table>
-                    
+
                     <h4 class="mt-4">Current Device</h4>
                     <div id="current-device-info">
                         <!-- Current device info will be shown here -->
+                    </div>
+
+                    <!-- Form to add current device if unknown -->
+                    <div id="add-device-section" class="mt-4" style="display: none;">
+                        <h4>Add Current Device</h4>
+                        <p class="text-warning">Your device is not in the known devices list. Please add it below:</p>
+
+                        <form id="add-device-form">
+                            <div class="mb-3">
+                                <label for="device-name" class="form-label">Device Name</label>
+                                <input type="text" class="form-control" id="device-name" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="device-type" class="form-label">Device Type</label>
+                                <select class="form-select" id="device-type" required>
+                                    <option value="PC">PC</option>
+                                    <option value="Laptop">Laptop</option>
+                                    <option value="Server">Server</option>
+                                    <option value="Tablet">Tablet</option>
+                                    <option value="Mobile">Mobile</option>
+                                    <option value="Other">Other</option>
+                                </select>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="device-model" class="form-label">Device Model</label>
+                                <input type="text" class="form-control" id="device-model" required>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="os-name" class="form-label">OS Name</label>
+                                <input type="text" class="form-control" id="os-name" required readonly>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="os-version" class="form-label">OS Version</label>
+                                <input type="text" class="form-control" id="os-version" required readonly>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="host-name" class="form-label">Host Name</label>
+                                <input type="text" class="form-control" id="host-name" required readonly>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="device-ip" class="form-label">IP Address</label>
+                                <input type="text" class="form-control" id="device-ip" required readonly>
+                            </div>
+
+                            <div class="mb-3">
+                                <label for="device-storage" class="form-label">Storage Space (bytes)</label>
+                                <input type="text" class="form-control" id="device-storage" required readonly>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">Add Device</button>
+                            <button type="button" class="btn btn-secondary" id="cancel-add-device">Cancel</button>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -322,16 +381,24 @@
             loadDevices();
         });
         
-        // Check if user is logged in
+        // Check if user is logged in and device status
         async function checkLoginStatus() {
             try {
                 const response = await fetch('/api/v1/devices', {
                     method: 'GET',
                     credentials: 'same-origin'
                 });
-                
+
                 if (response.ok) {
                     document.getElementById('login-status').textContent = 'Logged in';
+
+                    const data = await response.json();
+                    // Check if current device is known
+                    if (!data.current_device_known) {
+                        // Device is not in the known devices list
+                        // Navigate to devices tab and show the form
+                        showDeviceTab();
+                    }
                 } else {
                     document.getElementById('login-status').textContent = 'Not logged in';
                 }
@@ -729,6 +796,128 @@
             cell.textContent = text;
             return cell;
         }
+
+        // Function to show the device tab
+        function showDeviceTab() {
+            // Activate the devices tab
+            const deviceTabBtn = document.getElementById('devices-tab');
+            const deviceTabContent = document.getElementById('devices');
+
+            // Deselect all other tabs
+            const allTabBtns = document.querySelectorAll('.nav-link');
+            allTabBtns.forEach(btn => {
+                btn.classList.remove('active');
+            });
+
+            // Deselect all tab contents
+            const allTabContents = document.querySelectorAll('.tab-pane');
+            allTabContents.forEach(content => {
+                content.classList.remove('show', 'active');
+            });
+
+            // Activate the device tab
+            deviceTabBtn.classList.add('active');
+            deviceTabContent.classList.add('show', 'active');
+        }
+
+        // Function to show the form to add the current device
+        function showAddDeviceForm(deviceInfo) {
+            const addDeviceSection = document.getElementById('add-device-section');
+            const deviceNameInput = document.getElementById('device-name');
+            const deviceTypeSelect = document.getElementById('device-type');
+            const deviceModelInput = document.getElementById('device-model');
+            const hostNameInput = document.getElementById('host-name');
+            const deviceIpInput = document.getElementById('device-ip');
+            const deviceStorageInput = document.getElementById('device-storage');
+
+            // Populate the form with current device info
+            deviceNameInput.value = deviceInfo.device_name;
+            deviceModelInput.value = deviceInfo.device_model;
+            document.getElementById('os-name').value = deviceInfo.os_name;
+            document.getElementById('os-version').value = deviceInfo.os_version;
+            hostNameInput.value = deviceInfo.host_name;
+            deviceIpInput.value = deviceInfo.ip_addr;
+            deviceStorageInput.value = deviceInfo.storage_space;
+
+            // Show the form
+            addDeviceSection.style.display = 'block';
+
+            // Set up form submission
+            document.getElementById('add-device-form').onsubmit = addDevice;
+            document.getElementById('cancel-add-device').onclick = function() {
+                addDeviceSection.style.display = 'none';
+            };
+        }
+
+        // Function to add a device via API
+        async function addDevice(event) {
+            event.preventDefault(); // Prevent the default form submission
+
+            const deviceName = document.getElementById('device-name').value;
+            const deviceType = document.getElementById('device-type').value;
+            const deviceModel = document.getElementById('device-model').value;
+            const hostName = document.getElementById('host-name').value;
+            const deviceIp = document.getElementById('device-ip').value;
+            const deviceStorage = parseInt(document.getElementById('device-storage').value);
+
+            // Get the current device info for additional fields
+            const response = await fetch('/api/v1/devices', {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+
+            if (!response.ok) {
+                alert('Failed to get current device info');
+                return;
+            }
+
+            const data = await response.json();
+            const currentDeviceInfo = data.current_device_info;
+
+            // Create device object to send to API
+            const deviceData = {
+                device_name: deviceName,
+                device_type: deviceType,
+                device_model: deviceModel,
+                os_name: currentDeviceInfo.os_name,
+                os_version: currentDeviceInfo.os_version,
+                os_release: currentDeviceInfo.os_release,
+                host_name: hostName,
+                cpu_model: currentDeviceInfo.cpu_model,
+                memory_size: currentDeviceInfo.memory_size,
+                storage_space: deviceStorage,
+                ip_addr: deviceIp,
+                mac_addr: currentDeviceInfo.mac_addr,
+                thumbprint: currentDeviceInfo.thumbprint,
+                freedesktop_os_release: currentDeviceInfo.freedesktop_os_release
+            };
+
+            try {
+                const response = await fetch('/api/v1/devices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(deviceData),
+                    credentials: 'same-origin'
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.success) {
+                    alert('Device added successfully!');
+                    // Hide the form
+                    document.getElementById('add-device-section').style.display = 'none';
+                    // Refresh the device list
+                    await loadDevices();
+                } else {
+                    alert('Failed to add device: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error adding device:', error);
+                alert('Error adding device: ' + error.message);
+            }
+        }
         
         // Toggle directories visibility
         function toggleDirs() {
@@ -824,38 +1013,42 @@
                 method: 'GET',
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
-            
+
             const tbody = document.getElementById('devices-tbody');
             tbody.innerHTML = '';
-            
+
             data.devices.forEach(device => {
                 const row = document.createElement('tr');
-                
+
                 const nameCell = document.createElement('td');
                 nameCell.textContent = device.device_name;
                 row.appendChild(nameCell);
-                
+
                 const typeCell = document.createElement('td');
                 typeCell.textContent = device.device_type;
                 row.appendChild(typeCell);
-                
+
+                const osCell = document.createElement('td');
+                osCell.textContent = `${device.os_name} ${device.os_release}`;
+                row.appendChild(osCell);
+
                 const hostCell = document.createElement('td');
                 hostCell.textContent = device.host_name;
                 row.appendChild(hostCell);
-                
+
                 const modelCell = document.createElement('td');
                 modelCell.textContent = device.device_model;
                 row.appendChild(modelCell);
-                
+
                 const storageCell = document.createElement('td');
                 storageCell.textContent = formatBytes(device.storage_space);
                 row.appendChild(storageCell);
-                
+
                 tbody.appendChild(row);
             });
-            
+
             // Show current device info
             const currentDeviceDiv = document.getElementById('current-device-info');
             if (data.current_device_info) {
@@ -863,16 +1056,19 @@
                     <p><strong>Name:</strong> ${data.current_device_info.device_name}</p>
                     <p><strong>Type:</strong> ${data.current_device_info.device_type}</p>
                     <p><strong>Model:</strong> ${data.current_device_info.device_model}</p>
+                    <p><strong>OS:</strong> ${data.current_device_info.os_name} ${data.current_device_info.os_release}</p>
                     <p><strong>Host:</strong> ${data.current_device_info.host_name}</p>
                     <p><strong>IP:</strong> ${data.current_device_info.ip_addr}</p>
                     <p><strong>Storage:</strong> ${formatBytes(data.current_device_info.storage_space)}</p>
                     <p><strong>Known:</strong> ${data.current_device_known ? 'Yes' : 'No'}</p>
                 `;
-                
+
                 currentDeviceDiv.innerHTML = html;
-                
+
                 if (!data.current_device_known) {
                     currentDeviceDiv.innerHTML += '<p class="text-warning">This device is not in the known devices list. Please add it to the device manager.</p>';
+                    // Show the form to add the current device
+                    showAddDeviceForm(data.current_device_info);
                 }
             }
         }

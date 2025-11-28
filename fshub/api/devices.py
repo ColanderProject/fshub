@@ -34,7 +34,11 @@ def get_system_info():
         'storage_space': psutil.disk_usage('/').total if os.name != 'nt' else psutil.disk_usage('C:\\').total,
         'ip_addr': socket.gethostbyname(socket.gethostname()),
         'mac_addr': mac,
-        'thumbprint': calculate_thumbprint()
+        'os_name': platform.system(),  # OS name (e.g., Linux, Windows, Darwin)
+        'os_version': platform.version(),  # OS version
+        'os_release': platform.release(),  # OS release (e.g., kernel version on Linux)
+        'thumbprint': calculate_thumbprint(),
+        'freedesktop_os_release': platform.freedesktop_os_release()
     }
     return device_info
 
@@ -48,6 +52,8 @@ def calculate_thumbprint():
         platform.node(),  # hostname
         platform.machine(),  # architecture
         platform.processor(),  # CPU
+        platform.system(),  # OS name
+        platform.release(),  # OS release
         str(uuid.getnode()),  # MAC address
     ]
 

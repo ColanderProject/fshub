@@ -18,11 +18,11 @@ Imagining that a person has many devices: servers, laptops, desktop PCs, mobiles
 4. listen IP. default localhost
 5. Listen port, default 7303
 
-This package does not use relational data base. It store data just in file.
+This package does not use relational data base. It store data just in file. All time store in the file use unix timestamp.
 
 This package provides following functions:
 
-1. A page for device manager, device meta data is saved at `device` in data folder. When the web service started, it will load `device/devices_{hostname}.jl` (each line of the jl file is a json obj of a device, actually you need load `device/devices_*.jl` to cover all devices) to load all known devices, and check if current device in this list. If current device are not in it, ask user to add it. For each device, it has following properties: device name(user defined name, default is host name, and you may ask user to modify it before save), device type (PC, Laptop, mobile, etc.), device model, host name, CPU model, memory size, storage space size, IP addr (if has), MAC addr (if has) etc.. and you need create a algorithm to calculate an thumbprint fot the machine.  Save the storage media meta info to `device/media_{hostname}.jl`. Like hard disk, CD-ROM, USB disk etc. The propertise are: device name (gived by user), parent device id(if mobile device not set), size in bytes, crate time.
+1. A page for device manager, device meta data is saved at `device` in data folder. When the web service started, it will load `device/devices_{hostname}.jl` (each line of the jl file is a json obj of a device, actually you need load `device/devices_*.jl` to cover all devices) to load all known devices, and check if current device in this list. If current device are not in it, ask user to add it. For each device, it has following properties: device name(user defined name, default is host name, and you may ask user to modify it before save), device type (PC, Laptop, mobile, etc.), device model, host name, CPU model, memory size, storage space size, IP addr (if has), MAC addr (if has) etc.. and you need create a algorithm to calculate an thumbprint fot the machine.  Save the storage media meta info to `device/media_{hostname}.jl`. Like hard disk, CD-ROM, USB disk etc. The propertise are: device name (gived by user), parent device id(if mobile device not set), size in bytes, crate time.Ins
 
 2. Sanc(path), it can be called by Web API or command. It will use os.walk to visit all files and folders under the target path, example (no need to follow it, you can write the code as you need):
 ```
@@ -33,8 +33,8 @@ def scan(path, counters): # the counter is a dict, used to report scan state (er
             'p': '' # cur path
             'f': [], # file list
             'd': [], # dirs list
-            't': [], # fileCreatedTimestamp (create time, modify time, access time)
-            'T': [], # dirCreatedTimestamp (create time, modify time, access time)
+            't': [], # fileCreatedTimestamp (create time, modify time, access time) in unix timestamp
+            'T': [], # dirCreatedTimestamp (create time, modify time, access time) in unix timestamp
             's': [], # file sizes
         }
         # visit all file and dirs and append to result, and also update counters
@@ -55,3 +55,6 @@ The group file will store ['path', 'f' or 'd'(file or dir), groupName, 'add', ti
 8. A new page: Show all file sort by size: show a list of the largest file, support paging, default 20 item per page, allow set item per page. support filter, i.e. not show one or more group. For example filter out 'backup' and 'ignore' group, will only show large file not in those two group.
 9. Calc file hash manager, ask user use filter (filter in or filter out groups) to select a batch of file to calc hash, when user set filter, first show the file selected and then ask user confirm to start calc hash, put the files in a queue, use thread pool to run hash.
 10. A new page backup manager include two backup mode: backup to a zip file (use python zipfile lib to create a zip file, user can select compress level, user can apply a filter to compress the filtered files to the zip file.) and backup to a folder (user also can use filter to decided what file to backup, just copy the file to the target dir) ask user use filter (filter in or filter out groups) to select a batch of file to backup, when user set filter, show file backup info, file list of files in user selected group.
+
+update front end @fshub/templates/index.html. 1. In the <select> of snapshot, add a <option> at the first place, value is "", name is "Select a snapshot to show". 2. When select a snapshot, if the backend not load it. show a button to load snapshot (mean ask the backend read the file to memory and build index), but if the snapshot is loaded by backend, when <select> select it, ask frontend set is as current snapshot, and use the first node path as current path (use /api/v1/getPath to get the index 0, because not all snapshot has `/` path, we need get the index 0 to get the base path). 3. After select a snapshot that is loaded, display the content of index 0. Allow use to click the path to navigator to upper path (for example, current in `/root/document/test`, if user click 'root', go to `/root`. Add a back button to allow user return the privious path (need a stack in front end in memory, it is ok to clear it after page close)
+
