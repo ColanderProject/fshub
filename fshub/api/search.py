@@ -2,10 +2,6 @@
 
 from flask import Blueprint, request, jsonify
 import os
-import json
-import gzip
-from pathlib import Path
-from ..config import Config
 from .explorer import loaded_snapshots
 
 search_bp = Blueprint('search_bp', __name__)
@@ -26,12 +22,17 @@ def search_files():
     # If no specific snapshots provided, search all loaded snapshots
     if not snapshot_files:
         snapshot_files = list(loaded_snapshots.keys())
+
+    # Check if all requested snapshots are loaded
+    unloaded_snapshots = []
     for snapshot_filename in snapshot_files:
         if snapshot_filename not in loaded_snapshots:
-            # Try to load the snapshot
-            if not load_snapshot(snapshot_filename):
-                continue
-        
+            unloaded_snapshots.append(snapshot_filename)
+
+    if unloaded_snapshots:
+        return jsonify({'error': f'The following snapshots are not loaded: {", ".join(unloaded_snapshots)}'}), 400
+
+    for snapshot_filename in snapshot_files:
         snapshot_data = loaded_snapshots[snapshot_filename]['data']
         
         # Parse query for advanced options (e.g., 'ends:xxx', 'starts:xxx')

@@ -1164,18 +1164,25 @@
                 });
 
                 const data = await response.json();
-                
+
+                // Check if there's an error in the response
+                if (!response.ok || data.error) {
+                    const errorMessage = data.error || 'Unknown error occurred';
+                    document.getElementById('search-results-content').innerHTML = `<p class="text-danger">Error: ${errorMessage}</p>`;
+                    return;
+                }
+
                 const resultsDiv = document.getElementById('search-results-content');
                 resultsDiv.innerHTML = '';
-                
+
                 if (data.results.length === 0) {
                     resultsDiv.innerHTML = '<p>No results found.</p>';
                     return;
                 }
-                
+
                 const table = document.createElement('table');
                 table.className = 'table table-striped';
-                
+
                 const thead = document.createElement('thead');
                 thead.innerHTML = `
                     <tr>
@@ -1187,16 +1194,16 @@
                     </tr>
                 `;
                 table.appendChild(thead);
-                
+
                 const tbody = document.createElement('tbody');
-                
+
                 data.results.forEach(result => {
                     const row = document.createElement('tr');
-                    
+
                     const typeCell = document.createElement('td');
                     typeCell.textContent = result.type;
                     row.appendChild(typeCell);
-                    
+
                     const nameCell = document.createElement('td');
                     nameCell.className = 'filename-cell';
                     nameCell.textContent = result.name;
@@ -1206,11 +1213,11 @@
                         showFullFilenamePopup(result.name);
                     });
                     row.appendChild(nameCell);
-                    
+
                     const pathCell = document.createElement('td');
                     pathCell.textContent = result.path;
                     row.appendChild(pathCell);
-                    
+
                     const sizeCell = document.createElement('td');
                     if (result.type === 'file') {
                         sizeCell.textContent = formatBytes(result.size);
@@ -1218,14 +1225,14 @@
                         sizeCell.textContent = 'N/A';
                     }
                     row.appendChild(sizeCell);
-                    
+
                     const snapshotCell = document.createElement('td');
                     snapshotCell.textContent = result.snapshot;
                     row.appendChild(snapshotCell);
-                    
+
                     tbody.appendChild(row);
                 });
-                
+
                 table.appendChild(tbody);
                 resultsDiv.appendChild(table);
             } catch (error) {
