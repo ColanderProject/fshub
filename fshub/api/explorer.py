@@ -96,7 +96,7 @@ def get_path():
     if use_filter:
         return jsonify(filter_path_content(path_obj, snapshot_filename, filter_in, filter_out))
     else:
-        return jsonify(format_path_content(path_obj))
+        return jsonify(format_path_content(path_obj, snapshot_filename))
 
 
 @explorer_bp.route('/api/v1/snapshots', methods=['GET'])
@@ -187,16 +187,63 @@ def load_snapshot_file(snapshot_filename):
 
 
 def calculate_sub_counts(snapshot_filename):
-    """Calculate sub file/directory counts and total sizes for each path in the snapshot"""
+    """Calculate sub file/directory counts and total sizes for each path in the snapshot using recursion"""
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    
-    # First pass: calculate counts for each individual path object
+    path_index = loaded_snapshots[snapshot_filename]['index']
+
+    # Reset the S and C fields for all directories initially
     for path_obj in snapshot_data:
-        path_obj['sub_file_count'] = len(path_obj.get('f', []))
-        path_obj['sub_dir_count'] = len(path_obj.get('d', []))
-        
-        total_size = sum(path_obj.get('s', []))
-        path_obj['total_size'] = total_size
+        path_obj['S'] = sum(path_obj.get('s', []))  # Size of files directly in this directory
+        path_obj['C'] = len(path_obj.get('f', []))  # Count of files directly in this directory
+
+    # Recursive helper function to calculate total size and count for a directory
+    def calculate_recursive_totals(path_obj):
+        """Recursively calculate total size and file count for a directory and its subdirectories"""
+        total_size = path_obj['S']  # Start with the size of files directly in this directory
+        total_count = path_obj['C']  # Start with the count of files directly in this directory
+
+        # Get the directory path to look up subdirectories
+        current_path = path_obj['p']
+
+        # Process all subdirectories of the current path
+        for dirname in path_obj.get('d', []):
+            subdir_path = os.path.join(current_path, dirname).replace('\\', '/')
+            if subdir_path in path_index:
+                subdir_idx = path_index[subdir_path]
+                subdir_obj = snapshot_data[subdir_idx]
+
+                # Recursively calculate for the subdirectory
+                subdir_total_size, subdir_total_count = calculate_recursive_totals(subdir_obj)
+
+                # Add the subdirectory's totals to the current directory's totals
+                total_size += subdir_total_size
+                total_count += subdir_total_count
+
+        # Store the calculated totals in the path object
+        path_obj['S'] = total_size  # Total size including subdirectories
+        path_obj['C'] = total_count  # Total file count including subdirectories
+
+        return total_size, total_count
+
+    # To avoid recalculating for subdirectories multiple times, we should process from leaves up to root
+    # We'll first mark which paths have already been processed
+    processed = set()
+
+    def get_path_depth(path):
+        """Helper function to determine the depth of a path for ordering"""
+        return path.count('/') if path != '/' else 0  # Root path has depth 0
+
+    # Sort paths by depth in descending order (deepest first) to ensure children are processed before parents
+    sorted_path_indices = sorted(range(len(snapshot_data)),
+                                 key=lambda i: get_path_depth(snapshot_data[i]['p']),
+                                 reverse=True)
+
+    # Process each path object in depth order to calculate recursive totals
+    for idx in sorted_path_indices:
+        path_obj = snapshot_data[idx]
+        if path_obj['p'] not in processed:
+            calculate_recursive_totals(path_obj)
+            processed.add(path_obj['p'])
 
 
 def get_snapshot_info(snapshot_filename):
@@ -232,15 +279,15 @@ def get_snapshot_info(snapshot_filename):
     }
 
 
-def format_path_content(path_obj):
+def format_path_content(path_obj, snapshot_filename):
     """Format path content for API response"""
     import platform
-    
+
     files = []
     for i, filename in enumerate(path_obj.get('f', [])):
         size = path_obj['s'][i] if i < len(path_obj['s']) else 0
         timestamps = path_obj['t'][i] if i < len(path_obj['t']) else [None, None, None]
-        
+
         files.append({
             'name': filename,
             'size': size,
@@ -249,38 +296,49 @@ def format_path_content(path_obj):
             'modified': timestamps[1],
             'accessed': timestamps[2]
         })
-    
+
     dirs = []
     for i, dirname in enumerate(path_obj.get('d', [])):
         timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
-        
-        # Calculate sub counts if available
-        sub_file_count = path_obj.get('sub_file_count', 0) if i == 0 else 0  # Only for root
-        sub_dir_count = path_obj.get('sub_dir_count', 0) if i == 0 else 0  # Only for root
-        
-        dirs.append({
+
+        # Get sub counts and total size for this directory (calculated recursively)
+        # Find the corresponding subdirectory object to get its S and C values
+        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+
+        subdir_obj = None
+        if snapshot_filename and subdir_path in loaded_snapshots[snapshot_filename]['index']:
+            subdir_idx = loaded_snapshots[snapshot_filename]['index'][subdir_path]
+            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
+
+        dir_info = {
             'name': dirname,
             'created': timestamps[0],
             'modified': timestamps[1],
-            'accessed': timestamps[2],
-            'sub_file_count': sub_file_count,
-            'sub_dir_count': sub_dir_count
-        })
-    
+            'accessed': timestamps[2]
+        }
+
+        # Add recursive size and count if available
+        if subdir_obj:
+            dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
+            dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
+            dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
+            dir_info['file_count'] = subdir_obj.get('C', 0)
+
+        dirs.append(dir_info)
+
     # For Windows, normalize the root path to show drive letters
     current_path = path_obj['p']
     if platform.system() == 'Windows':
         # Convert Windows paths to a more web-friendly format
         current_path = current_path.replace('\\', '/')
-    
+
     return {
         'current_path': current_path,
         'files': files,
         'dirs': dirs,
-        'sub_file_count': path_obj.get('sub_file_count', 0),
-        'sub_dir_count': path_obj.get('sub_dir_count', 0),
-        'total_size': path_obj.get('total_size', 0),
-        'total_size_formatted': format_bytes(path_obj.get('total_size', 0))
+        'S': path_obj.get('S', 0),  # Total size including subdirectories
+        'C': path_obj.get('C', 0),  # Total file count including subdirectories
+        'total_size_formatted': format_bytes(path_obj.get('S', 0))
     }
 
 
@@ -353,13 +411,28 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
                 continue
         
         timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
-        
-        filtered_dirs.append({
+
+        # Get sub counts and total size for this directory (calculated recursively)
+        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+
+        dir_info = {
             'name': dirname,
             'created': timestamps[0],
             'modified': timestamps[1],
             'accessed': timestamps[2]
-        })
+        }
+
+        # Add recursive size and count if available
+        if subdir_path in loaded_snapshots[snapshot_filename]['index']:
+            subdir_idx = loaded_snapshots[snapshot_filename]['index'][subdir_path]
+            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
+
+            dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
+            dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
+            dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
+            dir_info['file_count'] = subdir_obj.get('C', 0)
+
+        filtered_dirs.append(dir_info)
     
     return {
         'current_path': path_obj['p'].replace('\\', '/') if os.name == 'nt' else path_obj['p'],

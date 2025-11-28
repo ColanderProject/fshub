@@ -27,6 +27,16 @@
             border-top: none;
             border-radius: 0 0 5px 5px;
         }
+        .filename-cell {
+            max-width: 200px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            position: relative;
+        }
+        .filename-cell:hover {
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -102,6 +112,8 @@
                             <thead>
                                 <tr>
                                     <th>Name</th>
+                                    <th>Total Size</th>
+                                    <th>Total Files</th>
                                     <th>Created</th>
                                     <th>Modified</th>
                                     <th>Accessed</th>
@@ -317,6 +329,21 @@
                     <div id="default-groups-content">
                         <!-- Default groups will be shown here -->
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filename Popup -->
+    <div id="filename-popup" class="modal fade" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Full Filename</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="full-filename-text" class="mb-0"></p>
                 </div>
             </div>
         </div>
@@ -644,9 +671,12 @@
 
                     // Create clickable directory name
                     const nameCell = document.createElement('td');
+                    nameCell.className = 'filename-cell';
                     const nameLink = document.createElement('a');
                     nameLink.href = '#';
                     nameLink.textContent = dir.name;
+                    nameLink.title = dir.name; // Show full name on hover
+                    // Add click handler for navigation
                     nameLink.addEventListener('click', (e) => {
                         e.preventDefault();
                         const newPath = currentPath === '/'
@@ -654,9 +684,17 @@
                             : `${currentPath}/${dir.name}`;
                         loadPath(snapshot, newPath);
                     });
+                    // Add click handler to show full filename in popup
+                    nameCell.addEventListener('click', (e) => {
+                        if (e.target === nameCell || e.target === nameLink) {
+                            showFullFilenamePopup(dir.name);
+                        }
+                    });
                     nameCell.appendChild(nameLink);
 
                     row.appendChild(nameCell);
+                    row.appendChild(createTextCell(formatBytes(dir.S) || '0 Bytes')); // Total Size
+                    row.appendChild(createTextCell(dir.C || 0)); // Total Files
                     row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
@@ -673,7 +711,13 @@
 
                     // Create file name cell
                     const nameCell = document.createElement('td');
+                    nameCell.className = 'filename-cell';
                     nameCell.textContent = file.name;
+                    nameCell.title = file.name; // Show full name on hover
+                    // Add click handler to show full filename in popup
+                    nameCell.addEventListener('click', (e) => {
+                        showFullFilenamePopup(file.name);
+                    });
                     row.appendChild(nameCell);
 
                     // Size cell
@@ -818,6 +862,13 @@
             // Activate the device tab
             deviceTabBtn.classList.add('active');
             deviceTabContent.classList.add('show', 'active');
+        }
+
+        // Function to show full filename in popup
+        function showFullFilenamePopup(filename) {
+            document.getElementById('full-filename-text').textContent = filename;
+            const popup = new bootstrap.Modal(document.getElementById('filename-popup'));
+            popup.show();
         }
 
         // Function to show the form to add the current device
@@ -992,7 +1043,13 @@
                 const row = document.createElement('tr');
                 
                 const nameCell = document.createElement('td');
+                nameCell.className = 'filename-cell';
                 nameCell.textContent = file.filename;
+                nameCell.title = file.filename; // Show full name on hover
+                // Add click handler to show full filename in popup
+                nameCell.addEventListener('click', (e) => {
+                    showFullFilenamePopup(file.filename);
+                });
                 row.appendChild(nameCell);
                 
                 const sizeCell = document.createElement('td');
@@ -1112,7 +1169,7 @@
                 thead.innerHTML = `
                     <tr>
                         <th>Type</th>
-                        <th>Name</th>
+                        <th style="max-width: 200px;">Name</th>
                         <th>Path</th>
                         <th>Size</th>
                         <th>Snapshot</th>
@@ -1130,7 +1187,13 @@
                     row.appendChild(typeCell);
                     
                     const nameCell = document.createElement('td');
+                    nameCell.className = 'filename-cell';
                     nameCell.textContent = result.name;
+                    nameCell.title = result.name; // Show full name on hover
+                    // Add click handler to show full filename in popup
+                    nameCell.addEventListener('click', (e) => {
+                        showFullFilenamePopup(result.name);
+                    });
                     row.appendChild(nameCell);
                     
                     const pathCell = document.createElement('td');
