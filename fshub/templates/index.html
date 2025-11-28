@@ -70,13 +70,15 @@
                 <div class="mb-3">
                     <label for="snapshot-select" class="form-label">Select Snapshot:</label>
                     <select class="form-select" id="snapshot-select">
-                        <option value="">Loading snapshots...</option>
+                        <option value="">Select a snapshot to show</option>
                     </select>
+                    <button class="btn btn-sm btn-primary mt-1" id="load-snapshot-btn" style="display:none;">Load Selected Snapshot</button>
                     <button class="btn btn-sm btn-primary mt-1" id="refresh-snapshots">Refresh</button>
                 </div>
                 
                 <div id="explorer-content">
                     <div class="path-breadcrumb">
+                        <button class="btn btn-sm btn-outline-secondary me-2" id="back-btn" style="display:none;">Back</button>
                         <span id="current-path">/</span>
                     </div>
                     
@@ -288,6 +290,7 @@
         // Global variables
         let currentSnapshot = null;
         let currentPath = '/';
+        let pathHistory = [];  // Stack for path navigation history
         let dirsVisible = true;
         let filesVisible = true;
         let defaultGroups = [];
@@ -304,6 +307,8 @@
             document.getElementById('do-login').addEventListener('click', performLogin);
             document.getElementById('refresh-snapshots').addEventListener('click', loadSnapshots);
             document.getElementById('snapshot-select').addEventListener('change', handleSnapshotChange);
+            document.getElementById('load-snapshot-btn').addEventListener('click', loadSelectedSnapshot);
+            document.getElementById('back-btn').addEventListener('click', goBack);
             document.getElementById('toggle-dirs').addEventListener('click', toggleDirs);
             document.getElementById('toggle-files').addEventListener('click', toggleFiles);
             document.getElementById('start-scan').addEventListener('click', startScan);
@@ -372,29 +377,38 @@
                 method: 'GET',
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
             allSnapshots = data.snapshots;
-            
+
             const select = document.getElementById('snapshot-select');
-            select.innerHTML = '';
-            
+            select.innerHTML = '<option value="">Select a snapshot to show</option>';
+
             data.snapshots.forEach(snapshot => {
                 const option = document.createElement('option');
                 option.value = snapshot.filename;
                 option.textContent = `${snapshot.filename} (${snapshot.size} bytes)`;
                 if (snapshot.loaded) {
                     option.textContent += ' [LOADED]';
+                    option.dataset.loaded = 'true';
+                } else {
+                    option.dataset.loaded = 'false';
                 }
                 select.appendChild(option);
             });
-            
+
             if (data.snapshots.length > 0) {
                 // Auto-select the first snapshot if none is selected
                 if (!currentSnapshot) {
-                    currentSnapshot = data.snapshots[0].filename;
+                    const firstSnapshot = data.snapshots[0];
+                    currentSnapshot = firstSnapshot.filename;
                     select.value = currentSnapshot;
-                    await loadSnapshot(currentSnapshot);
+                    if (firstSnapshot.loaded) {
+                        await loadSnapshot(currentSnapshot);
+                    } else {
+                        // Show the load button for unloaded snapshots
+                        document.getElementById('load-snapshot-btn').style.display = 'inline-block';
+                    }
                 }
             } else {
                 select.innerHTML = '<option value="">No snapshots available</option>';
@@ -405,43 +419,126 @@
         async function handleSnapshotChange() {
             const select = document.getElementById('snapshot-select');
             const selectedValue = select.value;
-            
+            const selectedOption = select.options[select.selectedIndex];
+
+            // Hide the load button initially
+            document.getElementById('load-snapshot-btn').style.display = 'none';
+
             if (selectedValue && selectedValue !== currentSnapshot) {
-                currentSnapshot = selectedValue;
-                await loadSnapshot(currentSnapshot);
+                if (selectedOption && selectedOption.dataset.loaded === 'true') {
+                    // If the snapshot is loaded, set it as current and get the index 0 path
+                    currentSnapshot = selectedValue;
+                    await getFirstPathAndLoad(currentSnapshot);
+                } else if (selectedOption && selectedOption.dataset.loaded === 'false') {
+                    // If the snapshot is not loaded, show the load button
+                    document.getElementById('load-snapshot-btn').style.display = 'inline-block';
+                }
+            } else if (!selectedValue) {
+                // If no snapshot is selected, reset everything
+                currentSnapshot = null;
+                currentPath = '/';
+                document.getElementById('current-path').textContent = '/';
+                document.getElementById('dirs-tbody').innerHTML = '';
+                document.getElementById('files-tbody').innerHTML = '';
             }
         }
         
         // Load a specific snapshot
-        async function loadSnapshot(filename) {
+        async function loadSelectedSnapshot() {
+            const select = document.getElementById('snapshot-select');
+            const selectedValue = select.value;
+
+            if (!selectedValue) {
+                alert('Please select a snapshot first');
+                return;
+            }
+
             const response = await fetch('/api/v1/load_snapshot', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ filename: filename }),
+                body: JSON.stringify({ filename: selectedValue }),
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
-            
+
             if (data.success) {
-                // Load the root path of this snapshot
-                await loadPath(currentSnapshot, '/');
-                await loadGroups(currentSnapshot);
+                // Update the option to mark it as loaded
+                const options = select.options;
+                for (let i = 0; i < options.length; i++) {
+                    if (options[i].value === selectedValue) {
+                        options[i].dataset.loaded = 'true';
+                        options[i].textContent = options[i].textContent.replace(' [UNLOADED]', ' [LOADED]') + ' [LOADED]';
+                        break;
+                    }
+                }
+
+                // Set current snapshot and get the first path
+                currentSnapshot = selectedValue;
+                await getFirstPathAndLoad(currentSnapshot);
+
+                // Hide the load button
+                document.getElementById('load-snapshot-btn').style.display = 'none';
             } else {
                 console.error('Failed to load snapshot:', data.error);
+                alert('Failed to load snapshot: ' + data.error);
+            }
+        }
+
+        // Get the first path (index 0) of a snapshot and load it
+        async function getFirstPathAndLoad(snapshot) {
+            // The instruction specifies to use /api/v1/getPath with index=0 to get the base path
+            // This call is to retrieve the first path of the snapshot which may not be "/"
+            const params = new URLSearchParams({
+                snapshot: snapshot,
+                index: 0
+            });
+
+            const response = await fetch(`/api/v1/getPath?${params}`, {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+
+            const data = await response.json();
+
+            // Handle the response based on what the API returns when called with index
+            if (response.ok) {
+                // The API should return the first path when called with index=0
+                // This might be in various formats depending on backend implementation
+                if (data.path) {
+                    // If API returns a 'path' field
+                    await loadPath(snapshot, data.path);
+                } else if (data.paths && Array.isArray(data.paths) && data.paths.length > 0) {
+                    // If API returns a 'paths' array
+                    await loadPath(snapshot, data.paths[0]);
+                } else if (data.current_path) {
+                    // If API returns the current_path
+                    await loadPath(snapshot, data.current_path);
+                } else {
+                    // Fallback to root if no path is obtained from index=0 call
+                    await loadPath(snapshot, '/');
+                }
+            } else {
+                // If the API call with index fails, fallback to root
+                await loadPath(snapshot, '/');
             }
         }
         
         // Load path content
         async function loadPath(snapshot, path) {
+            // Save current path to history before navigating to a new path
+            if (currentPath !== path) {
+                pathHistory.push(currentPath);
+            }
+
             const filterSelect = document.getElementById('filter-select');
             const useFilterCheck = document.getElementById('use-filter-check');
-            
+
             let filterIn = [];
             let filterOut = [];
-            
+
             if (useFilterCheck.checked) {
                 for (let i = 0; i < filterSelect.options.length; i++) {
                     if (filterSelect.options[i].selected) {
@@ -449,35 +546,35 @@
                     }
                 }
             }
-            
+
             const params = new URLSearchParams({
                 snapshot: snapshot,
                 path: path,
                 use_filter: useFilterCheck.checked
             });
-            
+
             if (filterIn.length > 0) {
                 params.append('filter_in', JSON.stringify(filterIn));
             }
-            
+
             const response = await fetch(`/api/v1/getPath?${params}`, {
                 method: 'GET',
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
-            
+
             if (response.ok) {
                 currentPath = data.current_path;
-                document.getElementById('current-path').textContent = currentPath;
-                
+                updateBreadcrumb(currentPath);
+
                 // Update directories table
                 const dirsTbody = document.getElementById('dirs-tbody');
                 dirsTbody.innerHTML = '';
-                
+
                 data.dirs.forEach(dir => {
                     const row = document.createElement('tr');
-                    
+
                     // Create clickable directory name
                     const nameCell = document.createElement('td');
                     const nameLink = document.createElement('a');
@@ -485,47 +582,108 @@
                     nameLink.textContent = dir.name;
                     nameLink.addEventListener('click', (e) => {
                         e.preventDefault();
-                        const newPath = currentPath === '/' 
-                            ? `/${dir.name}` 
+                        const newPath = currentPath === '/'
+                            ? `/${dir.name}`
                             : `${currentPath}/${dir.name}`;
                         loadPath(snapshot, newPath);
                     });
                     nameCell.appendChild(nameLink);
-                    
+
                     row.appendChild(nameCell);
                     row.appendChild(createTextCell(dir.created || 'N/A'));
                     row.appendChild(createTextCell(dir.modified || 'N/A'));
                     row.appendChild(createTextCell(dir.accessed || 'N/A'));
-                    
+
                     dirsTbody.appendChild(row);
                 });
-                
+
                 // Update files table
                 const filesTbody = document.getElementById('files-tbody');
                 filesTbody.innerHTML = '';
-                
+
                 data.files.forEach(file => {
                     const row = document.createElement('tr');
-                    
+
                     // Create file name cell
                     const nameCell = document.createElement('td');
                     nameCell.textContent = file.name;
                     row.appendChild(nameCell);
-                    
+
                     // Size cell
                     const sizeCell = document.createElement('td');
                     sizeCell.textContent = file.size_formatted;
                     row.appendChild(sizeCell);
-                    
+
                     // Timestamp cells
                     row.appendChild(createTextCell(file.created || 'N/A'));
                     row.appendChild(createTextCell(file.modified || 'N/A'));
                     row.appendChild(createTextCell(file.accessed || 'N/A'));
-                    
+
                     filesTbody.appendChild(row);
                 });
             } else {
                 console.error('Failed to load path:', data.error);
+            }
+        }
+
+        // Update the breadcrumb with clickable path segments
+        function updateBreadcrumb(path) {
+            const pathElement = document.getElementById('current-path');
+            pathElement.innerHTML = ''; // Clear existing content
+
+            // Add back button if there's history
+            const backBtn = document.getElementById('back-btn');
+            if (pathHistory.length > 0) {
+                backBtn.style.display = 'inline-block';
+            } else {
+                backBtn.style.display = 'none';
+            }
+
+            if (path === '/') {
+                // Special case for root path
+                pathElement.textContent = '/';
+                return;
+            }
+
+            // Split the path into segments
+            const segments = path.split('/').filter(segment => segment !== '');
+
+            // Add root link
+            const rootLink = document.createElement('a');
+            rootLink.href = '#';
+            rootLink.textContent = 'root';
+            rootLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                loadPath(currentSnapshot, '/');
+            });
+            pathElement.appendChild(rootLink);
+
+            // Add each segment as a clickable link to navigate to that path
+            segments.forEach((segment, index) => {
+                pathElement.appendChild(document.createTextNode('/'));
+
+                // Create a link for each segment that navigates to the path up to that segment
+                const link = document.createElement('a');
+                link.href = '#';
+                link.textContent = segment;
+                link.style.marginLeft = '5px';
+
+                // Calculate the path up to this segment
+                const pathToSegment = '/' + segments.slice(0, index + 1).join('/');
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    loadPath(currentSnapshot, pathToSegment);
+                });
+
+                pathElement.appendChild(link);
+            });
+        }
+
+        // Navigate back to the previous path
+        function goBack() {
+            if (pathHistory.length > 0) {
+                const previousPath = pathHistory.pop();
+                loadPath(currentSnapshot, previousPath);
             }
         }
         

@@ -54,8 +54,8 @@ def unload_snapshot():
 def get_path():
     """Get the content of a specific path from a snapshot"""
     snapshot_filename = request.args.get('snapshot', '')
-    path = request.args.get('path', '')
-    index = request.args.get('index', type=int)
+    path = request.args.get('path', None)
+    index = request.args.get('index', None, type=int)
     use_filter = request.args.get('use_filter', default=False, type=lambda x: x.lower() == 'true')
     filter_in = request.args.get('filter_in', default='[]')
     filter_out = request.args.get('filter_out', default='[]')
