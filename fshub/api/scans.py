@@ -48,9 +48,9 @@ def scan(path, counters, result_callback=None):
                     path_obj['f'].append(file)
                     path_obj['s'].append(stat.st_size)
                     path_obj['t'].append([
-                        datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                        datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        datetime.fromtimestamp(stat.st_atime).isoformat()
+                        int(stat.st_ctime),  # Unix timestamp for created
+                        int(stat.st_mtime),  # Unix timestamp for modified
+                        int(stat.st_atime)   # Unix timestamp for accessed
                     ])
                     
                     counters['scanned_count'] += 1
@@ -69,9 +69,9 @@ def scan(path, counters, result_callback=None):
                     stat = os.stat(dir_path)
                     path_obj['d'].append(directory)
                     path_obj['T'].append([
-                        datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                        datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                        datetime.fromtimestamp(stat.st_atime).isoformat()
+                        int(stat.st_ctime),  # Unix timestamp for created
+                        int(stat.st_mtime),  # Unix timestamp for modified
+                        int(stat.st_atime)   # Unix timestamp for accessed
                     ])
                 except OSError as e:
                     counters['errors'].append(f"Error accessing directory {dir_path}: {str(e)}")
@@ -119,8 +119,8 @@ def start_scan():
                 scan_result[0]['host_name'] = system_info['host_name']
                 scan_result[0]['ip_addr'] = system_info['ip_addr']
                 scan_result[0]['mac_addr'] = system_info['mac_addr']
-                scan_result[0]['start_scan_time'] = start_time.isoformat()
-                scan_result[0]['finish_scan_time'] = finish_time.isoformat()
+                scan_result[0]['start_scan_time'] = int(start_time.timestamp())  # Unix timestamp for start time
+                scan_result[0]['finish_scan_time'] = int(finish_time.timestamp())  # Unix timestamp for finish time
             
             # Save the result to a compressed file
             timestamp = int(time.time())
@@ -189,7 +189,7 @@ def start_scan():
             'path': scan_path,
             'status': 'running',
             'thread': thread,
-            'start_time': datetime.now().isoformat(),
+            'start_time': int(datetime.now().timestamp()),  # Unix timestamp for start time
             'counters': counters
         }
         thread.start()
@@ -228,7 +228,7 @@ def get_all_scans():
             scan_files.append({
                 'filename': file,
                 'size': stat.st_size,
-                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+                'modified': int(stat.st_mtime)  # Unix timestamp for modified time
             })
     
     return jsonify({'scan_files': scan_files})

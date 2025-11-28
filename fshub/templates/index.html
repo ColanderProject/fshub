@@ -689,16 +689,18 @@
         
         // Helper function to format timestamp to show only up to seconds (no fractional part)
         function formatTimestamp(timestamp) {
-            if (!timestamp || timestamp === 'N/A') {
-                return timestamp || 'N/A';
+            if (!timestamp && timestamp !== 0) {
+                return 'N/A';
             }
 
-            // If it's already a string that looks like it has fractional seconds, parse it
+            if (timestamp === 'N/A') {
+                return 'N/A';
+            }
+
             let date;
             if (typeof timestamp === 'string') {
-                // Check if the timestamp contains fractional seconds
+                // Check if it's a string with fractional seconds
                 if (timestamp.includes('.')) {
-                    // Parse the date string and format it to seconds precision
                     date = new Date(timestamp);
                 } else if (timestamp.match(/\d{4}-\d{2}-\d{2}.*\d{2}:\d{2}:\d{2}/)) {
                     // If it matches a date-time pattern but doesn't have fractional seconds, return as is
@@ -707,6 +709,9 @@
                     // If it's not a date-time format, return as is
                     return timestamp;
                 }
+            } else if (typeof timestamp === 'number') {
+                // Unix timestamp (number of seconds since epoch)
+                date = new Date(timestamp * 1000);  // Convert seconds to milliseconds
             } else if (timestamp instanceof Date) {
                 date = timestamp;
             } else {
