@@ -74,8 +74,8 @@ def get_path():
         return jsonify({'error': 'Cannot specify both path and index'}), 400
     
     if snapshot_filename not in loaded_snapshots:
-        if not load_snapshot_file(snapshot_filename):
-            return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
+        # if not load_snapshot_file(snapshot_filename):
+        return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
     
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
     
