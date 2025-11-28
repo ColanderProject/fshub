@@ -590,9 +590,9 @@
                     nameCell.appendChild(nameLink);
 
                     row.appendChild(nameCell);
-                    row.appendChild(createTextCell(dir.created || 'N/A'));
-                    row.appendChild(createTextCell(dir.modified || 'N/A'));
-                    row.appendChild(createTextCell(dir.accessed || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
 
                     dirsTbody.appendChild(row);
                 });
@@ -615,9 +615,9 @@
                     row.appendChild(sizeCell);
 
                     // Timestamp cells
-                    row.appendChild(createTextCell(file.created || 'N/A'));
-                    row.appendChild(createTextCell(file.modified || 'N/A'));
-                    row.appendChild(createTextCell(file.accessed || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(file.modified) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(file.accessed) || 'N/A'));
 
                     filesTbody.appendChild(row);
                 });
@@ -687,6 +687,37 @@
             }
         }
         
+        // Helper function to format timestamp to show only up to seconds (no fractional part)
+        function formatTimestamp(timestamp) {
+            if (!timestamp || timestamp === 'N/A') {
+                return timestamp || 'N/A';
+            }
+
+            // If it's already a string that looks like it has fractional seconds, parse it
+            let date;
+            if (typeof timestamp === 'string') {
+                // Check if the timestamp contains fractional seconds
+                if (timestamp.includes('.')) {
+                    // Parse the date string and format it to seconds precision
+                    date = new Date(timestamp);
+                } else if (timestamp.match(/\d{4}-\d{2}-\d{2}.*\d{2}:\d{2}:\d{2}/)) {
+                    // If it matches a date-time pattern but doesn't have fractional seconds, return as is
+                    return timestamp;
+                } else {
+                    // If it's not a date-time format, return as is
+                    return timestamp;
+                }
+            } else if (timestamp instanceof Date) {
+                date = timestamp;
+            } else {
+                // Assume it's a timestamp that needs to be formatted
+                date = new Date(timestamp);
+            }
+
+            // Format to show only up to seconds
+            return date.toISOString().slice(0, 19).replace('T', ' ');
+        }
+
         // Helper to create text cells
         function createTextCell(text) {
             const cell = document.createElement('td');
@@ -775,7 +806,7 @@
                 row.appendChild(sizeCell);
                 
                 const modCell = document.createElement('td');
-                modCell.textContent = file.modified;
+                modCell.textContent = formatTimestamp(file.modified);
                 row.appendChild(modCell);
                 
                 tbody.appendChild(row);
