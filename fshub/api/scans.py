@@ -8,8 +8,6 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from pathlib import Path
-import psutil
 from ..config import Config
 from ..utils import get_system_info
 

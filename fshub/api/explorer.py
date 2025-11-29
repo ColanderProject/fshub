@@ -26,10 +26,7 @@ def load_snapshot():
     success = load_snapshot_file(snapshot_filename)
     if not success:
         return jsonify({'error': f'Failed to load snapshot: {snapshot_filename}'}), 400
-    
-    # Calculate sub counts and total sizes
-    calculate_sub_counts(snapshot_filename)
-    
+
     return jsonify({
         'success': True,
         'message': f'Snapshot {snapshot_filename} loaded successfully',
@@ -176,20 +173,7 @@ def load_snapshot_file(snapshot_filename):
                     elif action_type == 'del':
                         groups_dict[group_name][item_type].discard(path)
 
-    loaded_snapshots[snapshot_filename] = {
-        'data': snapshot_data,
-        'index': path_index,
-        'groups': groups_dict
-    }
-    
-    return True
-
-
-def calculate_sub_counts(snapshot_filename):
-    """Calculate sub file/directory counts and total sizes for each path in the snapshot using recursion"""
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    path_index = loaded_snapshots[snapshot_filename]['index']
-
+    # Pre-calculate sub counts and total sizes for all directories
     # Reset the S and C fields for all directories initially
     for path_obj in snapshot_data:
         path_obj['S'] = sum(path_obj.get('s', []))  # Size of files directly in this directory
@@ -226,23 +210,33 @@ def calculate_sub_counts(snapshot_filename):
 
     # To avoid recalculating for subdirectories multiple times, we should process from leaves up to root
     # We'll first mark which paths have already been processed
-    processed = set()
+    # processed = set()
 
-    def get_path_depth(path):
-        """Helper function to determine the depth of a path for ordering"""
-        return path.count('/') if path != '/' else 0  # Root path has depth 0
+    # def get_path_depth(path):
+    #     """Helper function to determine the depth of a path for ordering"""
+    #     return path.count('/') if path != '/' else 0  # Root path has depth 0
 
-    # Sort paths by depth in descending order (deepest first) to ensure children are processed before parents
-    sorted_path_indices = sorted(range(len(snapshot_data)),
-                                 key=lambda i: get_path_depth(snapshot_data[i]['p']),
-                                 reverse=True)
+    # # Sort paths by depth in descending order (deepest first) to ensure children are processed before parents
+    # sorted_path_indices = sorted(range(len(snapshot_data)),
+    #                              key=lambda i: get_path_depth(snapshot_data[i]['p']),
+    #                              reverse=True)
 
     # Process each path object in depth order to calculate recursive totals
-    for idx in sorted_path_indices:
-        path_obj = snapshot_data[idx]
-        if path_obj['p'] not in processed:
-            calculate_recursive_totals(path_obj)
-            processed.add(path_obj['p'])
+    # for idx in sorted_path_indices:
+    #     path_obj = snapshot_data[idx]
+    #     if path_obj['p'] not in processed:
+    #         calculate_recursive_totals(path_obj)
+    #         processed.add(path_obj['p'])
+    calculate_recursive_totals(snapshot_data[0])  # Start from root
+    loaded_snapshots[snapshot_filename] = {
+        'data': snapshot_data,
+        'index': path_index,
+        'groups': groups_dict
+    }
+
+    return True
+
+
 
 
 def get_snapshot_info(snapshot_filename):
