@@ -158,7 +158,7 @@ def load_snapshot_file(snapshot_filename):
     base_name = snapshot_filename.replace('.jsonl.gz', '')
     groups_filename = f"{base_name}_groups.jl"
     groups_path = os.path.join(snapshot_dir, groups_filename)
-    
+
     groups_dict = {}
     if os.path.exists(groups_path):
         with open(groups_path, 'r', encoding='utf-8') as f:
@@ -166,17 +166,15 @@ def load_snapshot_file(snapshot_filename):
                 if line.strip():
                     action = json.loads(line)
                     path, item_type, group_name, action_type, timestamp = action
-                    
-                    full_path = f"{item_type}:{path}"
-                    
+
                     if group_name not in groups_dict:
-                        groups_dict[group_name] = set()
-                    
+                        groups_dict[group_name] = {'f': set(), 'd': set()}
+
                     if action_type == 'add':
-                        groups_dict[group_name].add(full_path)
+                        groups_dict[group_name][item_type].add(path)
                     elif action_type == 'del':
-                        groups_dict[group_name].discard(full_path)
-    
+                        groups_dict[group_name][item_type].discard(path)
+
     loaded_snapshots[snapshot_filename] = {
         'data': snapshot_data,
         'index': path_index,
@@ -345,36 +343,37 @@ def format_path_content(path_obj, snapshot_filename):
 def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
     """Filter path content based on groups"""
     groups_dict = loaded_snapshots[snapshot_filename]['groups']
-    
+
     # Filter files
     filtered_files = []
     for i, filename in enumerate(path_obj.get('f', [])):
         file_path = os.path.join(path_obj['p'], filename)
-        full_path = f"f:{file_path}"
-        
+
         # Check if file should be filtered out
         should_filter_out = False
         for group_name in filter_out:
-            if group_name in groups_dict and full_path in groups_dict[group_name]:
+            if (group_name in groups_dict and
+                file_path in groups_dict[group_name]['f']):
                 should_filter_out = True
                 break
-        
+
         if should_filter_out:
             continue
-        
+
         # If filter_in is specified, only include files in those groups
         if filter_in:
             should_include = False
             for group_name in filter_in:
-                if group_name in groups_dict and full_path in groups_dict[group_name]:
+                if (group_name in groups_dict and
+                    file_path in groups_dict[group_name]['f']):
                     should_include = True
                     break
             if not should_include:
                 continue
-        
+
         size = path_obj['s'][i] if i < len(path_obj['s']) else 0
         timestamps = path_obj['t'][i] if i < len(path_obj['t']) else [None, None, None]
-        
+
         filtered_files.append({
             'name': filename,
             'size': size,
@@ -383,33 +382,34 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
             'modified': timestamps[1],
             'accessed': timestamps[2]
         })
-    
+
     # Filter directories
     filtered_dirs = []
     for i, dirname in enumerate(path_obj.get('d', [])):
         dir_path = os.path.join(path_obj['p'], dirname)
-        full_path = f"d:{dir_path}"
-        
+
         # Check if directory should be filtered out
         should_filter_out = False
         for group_name in filter_out:
-            if group_name in groups_dict and full_path in groups_dict[group_name]:
+            if (group_name in groups_dict and
+                dir_path in groups_dict[group_name]['d']):
                 should_filter_out = True
                 break
-        
+
         if should_filter_out:
             continue
-        
+
         # If filter_in is specified, only include directories in those groups
         if filter_in:
             should_include = False
             for group_name in filter_in:
-                if group_name in groups_dict and full_path in groups_dict[group_name]:
+                if (group_name in groups_dict and
+                    dir_path in groups_dict[group_name]['d']):
                     should_include = True
                     break
             if not should_include:
                 continue
-        
+
         timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
 
         # Get sub counts and total size for this directory (calculated recursively)
@@ -433,7 +433,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
             dir_info['file_count'] = subdir_obj.get('C', 0)
 
         filtered_dirs.append(dir_info)
-    
+
     return {
         'current_path': path_obj['p'].replace('\\', '/') if os.name == 'nt' else path_obj['p'],
         'files': filtered_files,
