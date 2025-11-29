@@ -93,8 +93,10 @@
                     </div>
                     
                     <div class="mb-3">
-                        <label for="filter-select" class="form-label">Filter Groups:</label>
+                        <label for="filter-select" class="form-label">Filter Groups (Include):</label>
                         <select multiple class="form-select" id="filter-select"></select>
+                        <label for="filter-out-select" class="form-label mt-2">Filter Groups (Exclude):</label>
+                        <select multiple class="form-select" id="filter-out-select"></select>
                         <div class="form-check mt-2">
                             <input class="form-check-input" type="checkbox" id="use-filter-check">
                             <label class="form-check-label" for="use-filter-check">Use Filter</label>
@@ -388,6 +390,9 @@
         let defaultGroups = [];
         let allSnapshots = [];
         let allGroups = [];
+        let currentGroupData = null; // Cache for current group items
+        let currentPage = 1;
+        let itemsPerPage = 10;
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -408,7 +413,14 @@
             document.getElementById('create-zip-backup').addEventListener('click', createZipBackup);
             document.getElementById('create-folder-backup').addEventListener('click', createFolderBackup);
             document.getElementById('create-group').addEventListener('click', createGroup);
-            
+
+            // Add event listener to groups tab to load groups when clicked
+            document.getElementById('groups-tab').addEventListener('shown.bs.tab', function (event) {
+                if (currentSnapshot) {
+                    loadGroups(currentSnapshot);
+                }
+            });
+
             // Load initial data
             loadSnapshots();
             loadDevices();
@@ -634,6 +646,7 @@
             }
 
             const filterSelect = document.getElementById('filter-select');
+            const filterOutSelect = document.getElementById('filter-out-select');
             const useFilterCheck = document.getElementById('use-filter-check');
 
             let filterIn = [];
@@ -643,6 +656,12 @@
                 for (let i = 0; i < filterSelect.options.length; i++) {
                     if (filterSelect.options[i].selected) {
                         filterIn.push(filterSelect.options[i].value);
+                    }
+                }
+
+                for (let i = 0; i < filterOutSelect.options.length; i++) {
+                    if (filterOutSelect.options[i].selected) {
+                        filterOut.push(filterOutSelect.options[i].value);
                     }
                 }
             }
@@ -655,6 +674,10 @@
 
             if (filterIn.length > 0) {
                 params.append('filter_in', JSON.stringify(filterIn));
+            }
+
+            if (filterOut.length > 0) {
+                params.append('filter_out', JSON.stringify(filterOut));
             }
 
             const response = await fetch(`/api/v1/getPath?${params}`, {
@@ -1397,36 +1420,463 @@
         // Load groups for a snapshot
         async function loadGroups(snapshot) {
             if (!snapshot) return;
-            
+
             const response = await fetch(`/api/v1/groups/${snapshot}`, {
                 method: 'GET',
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
             allGroups = data.groups;
-            
-            // Update the filter select
+
+            // Update the filter select (for inclusion)
             const filterSelect = document.getElementById('filter-select');
             filterSelect.innerHTML = '';
-            
+
             data.groups.forEach(group => {
                 const option = document.createElement('option');
-                option.value = group;
-                option.textContent = group;
+                option.value = group.name;
+                option.textContent = group.name;
                 filterSelect.appendChild(option);
             });
-            
+
+            // Update the filter out select (for exclusion)
+            const filterOutSelect = document.getElementById('filter-out-select');
+            filterOutSelect.innerHTML = '';
+
+            data.groups.forEach(group => {
+                const option = document.createElement('option');
+                option.value = group.name;
+                option.textContent = group.name;
+                filterOutSelect.appendChild(option);
+            });
+
             // Update the backup filter select as well
             const backupFilterSelect = document.getElementById('backup-filter-select');
             backupFilterSelect.innerHTML = '';
-            
+
             data.groups.forEach(group => {
                 const option = document.createElement('option');
-                option.value = group;
-                option.textContent = group;
+                option.value = group.name;
+                option.textContent = group.name;
                 backupFilterSelect.appendChild(option);
             });
+
+            // Update the groups list in the groups tab
+            updateGroupsList();
+        }
+
+        // Update the groups list in the groups tab
+        function updateGroupsList() {
+            const groupsListContent = document.getElementById('groups-list-content');
+            groupsListContent.innerHTML = '';
+
+            if (allGroups.length === 0) {
+                groupsListContent.innerHTML = '<p>No groups available for this snapshot.</p>';
+                return;
+            }
+
+            const ul = document.createElement('ul');
+            ul.className = 'list-group';
+
+            allGroups.forEach(group => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                li.innerHTML = `
+                    <div>
+                        <strong>${group.name}</strong><br>
+                        <small class="text-muted">Files: ${group.file_count} | Directories: ${group.dir_count} | Total: ${group.total_count}</small>
+                    </div>
+                    <div>
+                        <button class="btn btn-sm btn-outline-primary me-1 view-group-btn" data-group="${group.name}">View</button>
+                        <button class="btn btn-sm btn-outline-secondary me-1 add-default-btn" data-group="${group.name}">Add as Default</button>
+                        <button class="btn btn-sm btn-outline-danger remove-group-btn" data-group="${group.name}">Remove</button>
+                    </div>
+                `;
+
+                // Add event listener to view group button
+                const viewBtn = li.querySelector('.view-group-btn');
+                viewBtn.addEventListener('click', function() {
+                    viewGroup(currentSnapshot, group.name);
+                });
+
+                // Add event listener to add as default button
+                const addDefaultBtn = li.querySelector('.add-default-btn');
+                addDefaultBtn.addEventListener('click', function() {
+                    addGroupAsDefault(group.name);
+                });
+
+                // Add event listener to remove group button
+                const removeBtn = li.querySelector('.remove-group-btn');
+                removeBtn.addEventListener('click', function() {
+                    removeGroup(currentSnapshot, group.name);
+                });
+
+                ul.appendChild(li);
+            });
+
+            groupsListContent.appendChild(ul);
+        }
+
+        // View details of a specific group
+        async function viewGroup(snapshot, group) {
+            const response = await fetch(`/api/v1/group/${snapshot}/files?group_name=${encodeURIComponent(group)}`, {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                alert('Error viewing group: ' + (data.error || 'Unknown error'));
+                return;
+            }
+
+            // Cache the group data
+            currentGroupData = {
+                name: group,
+                files: data.files.map(file => ({ name: file, type: 'file' })),
+                dirs: data.dirs.map(dir => ({ name: dir, type: 'directory' })),
+                allItems: []
+            };
+
+            // Combine files and directories
+            currentGroupData.allItems = [
+                ...currentGroupData.files,
+                ...currentGroupData.dirs
+            ];
+
+            // Reset pagination
+            currentPage = 1;
+            itemsPerPage = 10;
+
+            // Create modal for group details
+            const modalHtml = `
+                <div class="modal fade" id="groupModal" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-xl">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">Group: ${group}</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="row mb-3">
+                                    <div class="col-md-6">
+                                        <label for="filter-input" class="form-label">Filter items:</label>
+                                        <input type="text" class="form-control" id="filter-input" placeholder="Enter name to filter...">
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label for="items-per-page" class="form-label">Items per page:</label>
+                                        <select class="form-select" id="items-per-page">
+                                            <option value="5">5</option>
+                                            <option value="10" selected>10</option>
+                                            <option value="20">20</option>
+                                            <option value="50">50</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label">&nbsp;</label> <!-- Spacer for alignment -->
+                                        <div class="d-grid">
+                                            <button class="btn btn-primary" id="apply-filter">Apply Filter</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="table-responsive">
+                                    <table class="table table-striped" id="group-items-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Name</th>
+                                                <th>Type</th>
+                                                <th>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="group-items-tbody">
+                                            <!-- Items will be populated here -->
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <nav aria-label="Page navigation">
+                                    <ul class="pagination justify-content-center" id="pagination-container">
+                                        <!-- Pagination links will be populated here -->
+                                    </ul>
+                                </nav>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Remove any existing modal first
+            const existingModal = document.getElementById('groupModal');
+            if (existingModal) {
+                existingModal.remove();
+            }
+
+            // Add the modal HTML to the body
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+            // Show the modal
+            const modalElement = document.getElementById('groupModal');
+            const modal = new bootstrap.Modal(modalElement);
+            modal.show();
+
+            // Add event listeners for filtering and pagination
+            document.getElementById('apply-filter').addEventListener('click', renderGroupItems);
+            document.getElementById('items-per-page').addEventListener('change', function() {
+                itemsPerPage = parseInt(this.value);
+                currentPage = 1; // Reset to first page
+                renderGroupItems();
+            });
+            document.getElementById('filter-input').addEventListener('keyup', function(event) {
+                if (event.key === 'Enter') {
+                    renderGroupItems();
+                }
+            });
+
+            // Initial render
+            renderGroupItems();
+        }
+
+        // Render group items with filtering and pagination
+        function renderGroupItems() {
+            if (!currentGroupData) return;
+
+            const filterText = document.getElementById('filter-input').value.toLowerCase();
+            const itemsPerPageSelect = document.getElementById('items-per-page');
+            itemsPerPage = parseInt(itemsPerPageSelect.value);
+
+            // Filter items
+            let filteredItems = currentGroupData.allItems;
+            if (filterText) {
+                filteredItems = currentGroupData.allItems.filter(item =>
+                    item.name.toLowerCase().includes(filterText)
+                );
+            }
+
+            // Calculate pagination
+            const totalPages = Math.ceil(filteredItems.length / itemsPerPage);
+            if (currentPage > totalPages && totalPages > 0) {
+                currentPage = totalPages;
+            } else if (totalPages === 0) {
+                currentPage = 1;
+            }
+
+            // Get items for current page
+            const startIndex = (currentPage - 1) * itemsPerPage;
+            const endIndex = Math.min(startIndex + itemsPerPage, filteredItems.length);
+            const itemsForPage = filteredItems.slice(startIndex, endIndex);
+
+            // Render items table
+            const tbody = document.getElementById('group-items-tbody');
+            tbody.innerHTML = '';
+
+            if (itemsForPage.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.setAttribute('colspan', '3');
+                cell.textContent = 'No items match the filter.';
+                cell.className = 'text-center';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+            } else {
+                itemsForPage.forEach(item => {
+                    const row = document.createElement('tr');
+
+                    const nameCell = document.createElement('td');
+                    nameCell.textContent = item.name;
+
+                    const typeCell = document.createElement('td');
+                    typeCell.textContent = item.type;
+
+                    // Create actions cell with remove button
+                    const actionsCell = document.createElement('td');
+                    const removeBtn = document.createElement('button');
+                    removeBtn.className = 'btn btn-sm btn-outline-danger';
+                    removeBtn.textContent = 'Remove';
+                    removeBtn.addEventListener('click', function() {
+                        removeItemFromGroup(currentGroupData.name, item.name, item.type);
+                    });
+                    actionsCell.appendChild(removeBtn);
+
+                    row.appendChild(nameCell);
+                    row.appendChild(typeCell);
+                    row.appendChild(actionsCell);
+                    tbody.appendChild(row);
+                });
+            }
+
+            // Render pagination
+            renderPagination(totalPages, filteredItems.length);
+        }
+
+        // Render pagination controls
+        function renderPagination(totalPages, totalItems) {
+            const paginationContainer = document.getElementById('pagination-container');
+            paginationContainer.innerHTML = '';
+
+            if (totalPages <= 1) return;
+
+            // Previous button
+            const prevLi = document.createElement('li');
+            prevLi.className = `page-item ${currentPage === 1 ? 'disabled' : ''}`;
+            const prevLink = document.createElement('a');
+            prevLink.className = 'page-link';
+            prevLink.href = '#';
+            prevLink.textContent = 'Previous';
+            prevLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentPage > 1) {
+                    currentPage--;
+                    renderGroupItems();
+                }
+            });
+            prevLi.appendChild(prevLink);
+            paginationContainer.appendChild(prevLi);
+
+            // Page numbers
+            const startPage = Math.max(1, currentPage - 2);
+            const endPage = Math.min(totalPages, currentPage + 2);
+
+            if (startPage > 1) {
+                const firstPage = createPageLink(1);
+                paginationContainer.appendChild(firstPage);
+
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                const pageLink = createPageLink(i);
+                paginationContainer.appendChild(pageLink);
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+
+                const lastPage = createPageLink(totalPages);
+                paginationContainer.appendChild(lastPage);
+            }
+
+            // Next button
+            const nextLi = document.createElement('li');
+            nextLi.className = `page-item ${currentPage === totalPages ? 'disabled' : ''}`;
+            const nextLink = document.createElement('a');
+            nextLink.className = 'page-link';
+            nextLink.href = '#';
+            nextLink.textContent = 'Next';
+            nextLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentPage < totalPages) {
+                    currentPage++;
+                    renderGroupItems();
+                }
+            });
+            nextLi.appendChild(nextLink);
+            paginationContainer.appendChild(nextLi);
+        }
+
+        // Helper function to create a page link
+        function createPageLink(pageNumber) {
+            const li = document.createElement('li');
+            li.className = `page-item ${pageNumber === currentPage ? 'active' : ''}`;
+
+            const link = document.createElement('a');
+            link.className = 'page-link';
+            link.href = '#';
+            link.textContent = pageNumber;
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                currentPage = pageNumber;
+                renderGroupItems();
+            });
+
+            li.appendChild(link);
+            return li;
+        }
+
+        // Remove an item from a group
+        async function removeItemFromGroup(groupName, itemName, itemType) {
+            if (!currentSnapshot) {
+                alert('Please select a snapshot first');
+                return;
+            }
+
+            const result = await confirm(`Are you sure you want to remove "${itemName}" from group "${groupName}"?`);
+            if (!result) {
+                return; // User cancelled
+            }
+
+            // Determine the correct endpoint based on item type
+            let endpoint;
+            if (itemType === 'file') {
+                endpoint = `/api/v1/group/${currentSnapshot}/remove_file`;
+            } else if (itemType === 'directory') {
+                endpoint = `/api/v1/group/${currentSnapshot}/remove_dir`;
+            } else {
+                alert('Invalid item type. Must be "file" or "directory"');
+                return;
+            }
+
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    path: itemName,
+                    group_name: groupName
+                }),
+                credentials: 'same-origin'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                alert(`Item removed from group "${groupName}" successfully!`);
+                // Refresh the current view to reflect the change
+                viewGroup(currentSnapshot, groupName);
+            } else {
+                alert('Failed to remove item from group: ' + (data.error || 'Unknown error'));
+            }
+        }
+
+        // Remove a group
+        async function removeGroup(snapshot, group) {
+            if (!confirm(`Are you sure you want to remove the group "${group}"?`)) {
+                return;
+            }
+
+            // This would require a backend endpoint to delete a group
+            // For now, we can just show a message
+            alert('Group removal is not implemented in this version.');
+        }
+
+        // Add a group as default
+        function addGroupAsDefault(groupName) {
+            // Check if the group is already in the default groups
+            if (defaultGroups.includes(groupName)) {
+                alert(`"${groupName}" is already a default group.`);
+                return;
+            }
+
+            // Add the group to default groups
+            defaultGroups.push(groupName);
+
+            // Update the UI
+            updateDefaultGroupsUI();
+
+            alert(`"${groupName}" has been added as a default group.`);
         }
         
         // Add an item to a group

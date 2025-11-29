@@ -14,13 +14,26 @@ loaded_groups = {}  # Key: snapshot_filename, Value: {group_name: set of paths}
 
 @group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
 def get_groups(snapshot_filename):
-    """Get all groups for a specific snapshot"""
+    """Get all groups for a specific snapshot with file and directory counts"""
     if snapshot_filename not in loaded_groups:
         # Load groups from file if not already loaded
         load_groups_for_snapshot(snapshot_filename)
-    
-    groups = list(loaded_groups.get(snapshot_filename, {}).keys())
-    return jsonify({'groups': groups})
+
+    snapshot_groups = loaded_groups.get(snapshot_filename, {})
+    groups_with_counts = []
+
+    for group_name, items in snapshot_groups.items():
+        files = [item for item in items if item.startswith('f:')]
+        dirs = [item for item in items if item.startswith('d:')]
+
+        groups_with_counts.append({
+            'name': group_name,
+            'file_count': len(files),
+            'dir_count': len(dirs),
+            'total_count': len(files) + len(dirs)
+        })
+
+    return jsonify({'groups': groups_with_counts})
 
 
 @group_bp.route('/api/v1/group/<snapshot_filename>/add_file', methods=['POST'])
