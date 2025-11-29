@@ -448,9 +448,8 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
     }
 
 
-def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
-    """Recursively calculate total size and file count for a directory and its subdirectories based on filters"""
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
+def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None):
+    """Recursively for a directory and its subdirectories based on filters"""
 
     # Start with files directly in this directory that pass the filter
     total_size = 0
@@ -483,22 +482,49 @@ def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, 
             size = path_obj['s'][i] if i < len(path_obj['s']) else 0
             total_size += size
             total_count += 1
+            if files:
+                files.append({
+                    'name': filename,
+                    'full_path': file_path,
+                    'size': size,
+                    'created': path_obj['t'][i][0] if i < len(path_obj['t']) else None,
+                })
 
     # Process all subdirectories of the current path
-    path_index = loaded_snapshots[snapshot_filename]['index']
     for dirname in path_obj.get('d', []):
         subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
         if subdir_path in path_index:
             subdir_idx = path_index[subdir_path]
-            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
+            subdir_obj = data[subdir_idx]
 
             # Recursively calculate for the subdirectory
-            subdir_total_size, subdir_total_count = calculate_filtered_recursive_totals(
-                subdir_obj, snapshot_filename, filter_in, filter_out
-            )
+            subdir_total_size, subdir_total_count = filter_on_snapshot(subdir_obj, data, path_index,
+                filter_in, filter_out, groups_dict, files)
 
             # Add the subdirectory's totals to the current directory's totals
             total_size += subdir_total_size
             total_count += subdir_total_count
 
     return total_size, total_count
+
+
+def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
+    return filter_on_snapshot(path_obj, loaded_snapshots[snapshot_filename]["data"],
+                        loaded_snapshots[snapshot_filename]["index"], filter_in, 
+                        filter_out, loaded_snapshots[snapshot_filename]["groups"],
+                        None)
+
+
+def get_filter_files(snapshot_filename, filter_in, filter_out):
+    """Get files from a snapshot that match the filter criteria"""
+    if snapshot_filename not in loaded_snapshots:
+        return []
+
+    snapshot_data = loaded_snapshots[snapshot_filename]['data']
+    index = loaded_snapshots[snapshot_filename]['index']
+    groups_dict = loaded_snapshots[snapshot_filename]['groups']
+    path_obj = snapshot_data[0]  # Start from root
+    filtered_files = []
+    filter_on_snapshot(path_obj, snapshot_data, index, filter_in,
+                        filter_out, groups_dict, filtered_files)
+    return filtered_files

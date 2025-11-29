@@ -2,12 +2,10 @@
 
 from flask import Blueprint, request, jsonify
 import os
-import json
-import gzip
 import zipfile
-import shutil
-from datetime import datetime
+import time
 from ..config import Config
+from .explorer import get_filter_files
 
 backup_bp = Blueprint('backup_bp', __name__)
 
@@ -93,51 +91,4 @@ def create_folder_backup():
 
 def get_filtered_files(snapshot_filename, filter_in, filter_out):
     """Get files from a snapshot that match the filter criteria"""
-    from .search import loaded_snapshots, load_snapshot
-
-    if snapshot_filename not in loaded_snapshots:
-        if not load_snapshot(snapshot_filename):
-            return []
-
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
-
-    filtered_files = []
-
-    for path_obj in snapshot_data:
-        current_path = path_obj['p']
-
-        # Process files
-        for i, filename in enumerate(path_obj.get('f', [])):
-            file_path = os.path.join(current_path, filename)
-            full_path = f"f:{file_path}"
-
-            # Check if file should be filtered out
-            should_filter_out = False
-            for group_name in filter_out:
-                if group_name in groups_dict and full_path in groups_dict[group_name]:
-                    should_filter_out = True
-                    break
-
-            if should_filter_out:
-                continue
-
-            # If filter_in is specified, only include files in those groups
-            if filter_in:
-                should_include = False
-                for group_name in filter_in:
-                    if group_name in groups_dict and full_path in groups_dict[group_name]:
-                        should_include = True
-                        break
-                if not should_include:
-                    continue
-
-            # Add file to filtered list
-            filtered_files.append({
-                'name': filename,
-                'path': current_path,
-                'full_path': file_path,
-                'size': path_obj['s'][i] if i < len(path_obj['s']) else 0
-            })
-
-    return filtered_files
+    return get_filter_files(snapshot_filename, filter_in, filter_out)

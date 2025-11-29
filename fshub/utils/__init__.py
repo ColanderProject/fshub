@@ -3,7 +3,7 @@
 import platform
 import socket
 import uuid
-
+import os
 
 def get_system_info():
     """Get system information for the current device"""
