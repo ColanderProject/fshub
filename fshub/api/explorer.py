@@ -450,7 +450,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
 
 def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None):
     """Recursively for a directory and its subdirectories based on filters"""
-
+    print("Filtering on path:", path_obj['p'])
     # Start with files directly in this directory that pass the filter
     total_size = 0
     total_count = 0
@@ -482,7 +482,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
             size = path_obj['s'][i] if i < len(path_obj['s']) else 0
             total_size += size
             total_count += 1
-            if files:
+            if files is not None:
                 files.append({
                     'name': filename,
                     'full_path': file_path,
@@ -493,6 +493,25 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
     # Process all subdirectories of the current path
     for dirname in path_obj.get('d', []):
         subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+        should_filter_out = False
+        for group_name in filter_out:
+            if (group_name in groups_dict and
+                subdir_path in groups_dict[group_name]['d']):
+                should_filter_out = True
+                break
+        if should_filter_out:
+            continue
+        should_include = True
+        if filter_in:
+            should_include = False
+            for group_name in filter_in:
+                if (group_name in groups_dict and
+                    subdir_path in groups_dict[group_name]['d']):
+                    should_include = True
+                    break
+
+        if not should_include:
+            continue
         if subdir_path in path_index:
             subdir_idx = path_index[subdir_path]
             subdir_obj = data[subdir_idx]
@@ -515,7 +534,7 @@ def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, 
                         None)
 
 
-def get_filter_files(snapshot_filename, filter_in, filter_out):
+def get_filtered_files(snapshot_filename, filter_in, filter_out):
     """Get files from a snapshot that match the filter criteria"""
     if snapshot_filename not in loaded_snapshots:
         return []

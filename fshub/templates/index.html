@@ -290,32 +290,122 @@
             <!-- Backup Tab -->
             <div class="tab-pane fade" id="backup" role="tabpanel">
                 <h3>Backup Manager</h3>
+
+                <div class="mb-3">
+                    <h4>Backup Settings</h4>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label for="backup-name" class="form-label">Backup Name:</label>
+                            <input type="text" class="form-control" id="backup-name" placeholder="My Backup">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="backup-target-name" class="form-label">Backup Target Name:</label>
+                            <input type="text" class="form-control" id="backup-target-name" placeholder="My Computer">
+                        </div>
+                    </div>
+                </div>
+
                 <div class="mb-3">
                     <h4>Backup to ZIP</h4>
                     <div class="mb-3">
-                        <label for="backup-zip-path" class="form-label">Target ZIP file:</label>
-                        <input type="text" class="form-control" id="backup-zip-path" placeholder="/path/to/backup.zip">
+                        <label for="backup-zip-path" class="form-label">Target ZIP file or folder:</label>
+                        <input type="text" class="form-control" id="backup-zip-path" placeholder="/path/to/backup.zip or /path/to/folder/">
                     </div>
-                    <div class="mb-3">
-                        <label for="backup-zip-compress" class="form-label">Compression level (0-9):</label>
-                        <input type="number" class="form-control" id="backup-zip-compress" min="0" max="9" value="6">
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="backup-zip-compress" class="form-label">Compression level (0-9):</label>
+                            <input type="number" class="form-control" id="backup-zip-compress" min="0" max="9" value="6">
+                        </div>
+                        <div class="col-md-6">
+                            <label for="max-zip-size" class="form-label">Max ZIP file size (MB):</label>
+                            <input type="number" class="form-control" id="max-zip-size" min="1" value="100">
+                        </div>
                     </div>
-                    <button class="btn btn-primary" id="create-zip-backup">Create ZIP Backup</button>
+                    <button class="btn btn-primary me-2" id="dry-run-zip">Dry Run ZIP</button>
+                    <button class="btn btn-success" id="create-zip-backup">Create ZIP Backup</button>
                 </div>
-                
+
                 <div class="mb-3">
                     <h4>Backup to Folder</h4>
                     <div class="mb-3">
                         <label for="backup-folder-path" class="form-label">Target folder:</label>
                         <input type="text" class="form-control" id="backup-folder-path" placeholder="/path/to/backup/folder">
                     </div>
-                    <button class="btn btn-primary" id="create-folder-backup">Create Folder Backup</button>
+                    <button class="btn btn-primary me-2" id="dry-run-folder">Dry Run Folder</button>
+                    <button class="btn btn-success" id="create-folder-backup">Create Folder Backup</button>
                 </div>
-                
+
+                <div id="backup-preview" class="mb-3" style="display: none;">
+                    <h4>Files to Backup</h4>
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <input type="text" class="form-control" id="preview-filter" placeholder="Filter files by name/path...">
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select" id="preview-sort">
+                                <option value="name">Sort by Name</option>
+                                <option value="size">Sort by Size</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select" id="preview-pagesize">
+                                <option value="10">10 per page</option>
+                                <option value="20">20 per page</option>
+                                <option value="50" selected>50 per page</option>
+                                <option value="100">100 per page</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>File Name</th>
+                                    <th>Path</th>
+                                    <th>Size</th>
+                                </tr>
+                            </thead>
+                            <tbody id="preview-tbody">
+                                <!-- Files will be populated here -->
+                            </tbody>
+                        </table>
+                    </div>
+                    <nav aria-label="Preview pagination">
+                        <ul class="pagination justify-content-center" id="preview-pagination">
+                            <!-- Pagination will be populated here -->
+                        </ul>
+                    </nav>
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-3">
+                        <button class="btn btn-success" id="confirm-backup">Confirm and Start Backup</button>
+                        <button class="btn btn-secondary" id="cancel-preview">Cancel</button>
+                    </div>
+                </div>
+
+                <div id="backup-progress" class="mb-3" style="display: none;">
+                    <h4>Backup Progress</h4>
+                    <div class="progress mb-2">
+                        <div class="progress-bar" id="backup-progress-bar" role="progressbar" style="width: 0%"></div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p>Status: <span id="backup-status">Starting...</span></p>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            <p>Files: <span id="backup-progress-text">0/0</span></p>
+                        </div>
+                    </div>
+                    <div class="current-file">
+                        <p>Current file: <span id="current-file">None</span></p>
+                    </div>
+                    <button class="btn btn-danger" id="stop-backup">Stop Backup</button>
+                </div>
+
                 <div id="backup-filters">
                     <h4>Filters</h4>
-                    <label for="backup-filter-select" class="form-label">Select groups to include/exclude:</label>
-                    <select multiple class="form-select" id="backup-filter-select"></select>
+                    <label for="backup-filter-in-select" class="form-label">Select groups to include:</label>
+                    <select multiple class="form-select" id="backup-filter-in-select"></select>
+                    <label for="backup-filter-out-select" class="form-label mt-2">Select groups to exclude:</label>
+                    <select multiple class="form-select" id="backup-filter-out-select"></select>
                 </div>
             </div>
             
@@ -397,6 +487,11 @@
         let currentGroupData = null; // Cache for current group items
         let currentPage = 1;
         let itemsPerPage = 10;
+        let backupPreviewData = null; // Cache for backup preview files
+        let backupPreviewCurrentPage = 1;
+        let backupPreviewItemsPerPage = 50;
+        let backupTaskId = null; // Current backup task ID
+        let backupInterval = null; // Interval for checking backup progress
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -417,6 +512,24 @@
             document.getElementById('create-zip-backup').addEventListener('click', createZipBackup);
             document.getElementById('create-folder-backup').addEventListener('click', createFolderBackup);
             document.getElementById('create-group').addEventListener('click', createGroup);
+
+            // Add event listeners for dry run buttons
+            document.getElementById('dry-run-zip').addEventListener('click', () => performDryRun('zip'));
+            document.getElementById('dry-run-folder').addEventListener('click', () => performDryRun('folder'));
+
+            // Add event listeners for preview controls
+            document.getElementById('preview-filter').addEventListener('input', renderPreviewTable);
+            document.getElementById('preview-sort').addEventListener('change', renderPreviewTable);
+            document.getElementById('preview-pagesize').addEventListener('change', function() {
+                itemsPerPage = parseInt(this.value);
+                currentPage = 1; // Reset to first page
+                renderPreviewTable();
+            });
+
+            // Add event listeners for preview actions
+            document.getElementById('confirm-backup').addEventListener('click', confirmAndStartBackup);
+            document.getElementById('cancel-preview').addEventListener('click', cancelPreview);
+            document.getElementById('stop-backup').addEventListener('click', stopBackup);
 
             // Add event listener to groups tab to load groups when clicked
             document.getElementById('groups-tab').addEventListener('shown.bs.tab', function (event) {
@@ -1344,28 +1457,42 @@
             }
         }
         
-        // Create ZIP backup
-        async function createZipBackup() {
-            const targetPath = document.getElementById('backup-zip-path').value;
+        // Perform dry run
+        async function performDryRun(backupType) {
+            const targetPath = backupType === 'zip'
+                ? document.getElementById('backup-zip-path').value
+                : document.getElementById('backup-folder-path').value;
             const compressLevel = parseInt(document.getElementById('backup-zip-compress').value);
-            const filterSelect = document.getElementById('backup-filter-select');
-            
+            const maxZipSize = parseInt(document.getElementById('max-zip-size').value) * 1024 * 1024; // Convert MB to bytes
+            const backupName = document.getElementById('backup-name').value || 'backup';
+            const backupTargetName = document.getElementById('backup-target-name').value || 'backup_target';
+
+            const filterInSelect = document.getElementById('backup-filter-in-select');
+            const filterOutSelect = document.getElementById('backup-filter-out-select');
+
             let filterIn = [];
             let filterOut = [];
-            
-            // For this simple version, we'll consider selected options as "filter in"
-            for (let i = 0; i < filterSelect.options.length; i++) {
-                if (filterSelect.options[i].selected) {
-                    filterIn.push(filterSelect.options[i].value);
+
+            // Get selected filter in values
+            for (let i = 0; i < filterInSelect.options.length; i++) {
+                if (filterInSelect.options[i].selected) {
+                    filterIn.push(filterInSelect.options[i].value);
                 }
             }
-            
+
+            // Get selected filter out values
+            for (let i = 0; i < filterOutSelect.options.length; i++) {
+                if (filterOutSelect.options[i].selected) {
+                    filterOut.push(filterOutSelect.options[i].value);
+                }
+            }
+
             if (!targetPath) {
-                alert('Please specify a target path for the ZIP file');
+                alert('Please specify a target path');
                 return;
             }
-            
-            const response = await fetch('/api/v1/backup/zip', {
+
+            const response = await fetch(`/api/v1/backup/${backupType}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1375,41 +1502,245 @@
                     target_path: targetPath,
                     filter_in: filterIn,
                     filter_out: filterOut,
-                    compress_level: compressLevel
+                    compress_level: compressLevel,
+                    dry_run: true,
+                    backup_name: backupName,
+                    backup_target_name: backupTargetName,
+                    max_file_size: maxZipSize
                 }),
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
-            
+
             if (response.ok) {
-                alert(`ZIP backup created successfully: ${data.files_backed_up} files`);
+                // Cache the results for preview
+                backupPreviewData = data.files_to_backup;
+
+                // Show the preview section
+                document.getElementById('backup-preview').style.display = 'block';
+
+                // Reset pagination
+                backupPreviewCurrentPage = 1;
+                backupPreviewItemsPerPage = parseInt(document.getElementById('preview-pagesize').value);
+
+                // Render the preview table
+                renderPreviewTable();
             } else {
-                alert('Backup failed: ' + data.error);
+                alert('Dry run failed: ' + data.error);
             }
         }
-        
-        // Create folder backup
-        async function createFolderBackup() {
-            const targetPath = document.getElementById('backup-folder-path').value;
-            const filterSelect = document.getElementById('backup-filter-select');
-            
-            let filterIn = [];
-            let filterOut = [];
-            
-            // For this simple version, we'll consider selected options as "filter in"
-            for (let i = 0; i < filterSelect.options.length; i++) {
-                if (filterSelect.options[i].selected) {
-                    filterIn.push(filterSelect.options[i].value);
+
+        // Render the preview table with pagination, filtering, and sorting
+        function renderPreviewTable() {
+            if (!backupPreviewData) return;
+
+            // Get filter and sort parameters
+            const filterText = document.getElementById('preview-filter').value.toLowerCase();
+            const sortOption = document.getElementById('preview-sort').value;
+
+            // Filter the data
+            let filteredData = backupPreviewData;
+            if (filterText) {
+                filteredData = backupPreviewData.filter(file =>
+                    file.name.toLowerCase().includes(filterText) ||
+                    file.full_path.toLowerCase().includes(filterText)
+                );
+            }
+
+            // Sort the data
+            if (sortOption === 'name') {
+                filteredData.sort((a, b) => a.name.localeCompare(b.name));
+            } else if (sortOption === 'size') {
+                filteredData.sort((a, b) => (b.size || 0) - (a.size || 0));
+            }
+
+            // Calculate pagination
+            const startIndex = (backupPreviewCurrentPage - 1) * backupPreviewItemsPerPage;
+            const endIndex = Math.min(startIndex + backupPreviewItemsPerPage, filteredData.length);
+            const itemsForPage = filteredData.slice(startIndex, endIndex);
+
+            // Render items table
+            const tbody = document.getElementById('preview-tbody');
+            tbody.innerHTML = '';
+
+            if (itemsForPage.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.setAttribute('colspan', '3');
+                cell.textContent = 'No files match the filter.';
+                cell.className = 'text-center';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+            } else {
+                itemsForPage.forEach(file => {
+                    const row = document.createElement('tr');
+
+                    const nameCell = document.createElement('td');
+                    nameCell.textContent = file.name;
+
+                    const pathCell = document.createElement('td');
+                    pathCell.textContent = file.full_path;
+
+                    const sizeCell = document.createElement('td');
+                    sizeCell.textContent = formatBytes(file.size || 0);
+
+                    row.appendChild(nameCell);
+                    row.appendChild(pathCell);
+                    row.appendChild(sizeCell);
+                    tbody.appendChild(row);
+                });
+            }
+
+            // Render pagination
+            renderPreviewPagination(filteredData.length);
+        }
+
+        // Render pagination controls for preview
+        function renderPreviewPagination(totalItems) {
+            const paginationContainer = document.getElementById('preview-pagination');
+            const totalPages = Math.ceil(totalItems / backupPreviewItemsPerPage);
+
+            paginationContainer.innerHTML = '';
+
+            if (totalPages <= 1) return;
+
+            // Previous button
+            const prevLi = document.createElement('li');
+            prevLi.className = `page-item ${backupPreviewCurrentPage === 1 ? 'disabled' : ''}`;
+            const prevLink = document.createElement('a');
+            prevLink.className = 'page-link';
+            prevLink.href = '#';
+            prevLink.textContent = 'Previous';
+            prevLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (backupPreviewCurrentPage > 1) {
+                    backupPreviewCurrentPage--;
+                    renderPreviewTable();
+                }
+            });
+            prevLi.appendChild(prevLink);
+            paginationContainer.appendChild(prevLi);
+
+            // Page numbers
+            const startPage = Math.max(1, backupPreviewCurrentPage - 2);
+            const endPage = Math.min(totalPages, backupPreviewCurrentPage + 2);
+
+            if (startPage > 1) {
+                const firstPage = createPreviewPageLink(1);
+                paginationContainer.appendChild(firstPage);
+
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
                 }
             }
-            
-            if (!targetPath) {
-                alert('Please specify a target path for the backup folder');
-                return;
+
+            for (let i = startPage; i <= endPage; i++) {
+                const pageLink = createPreviewPageLink(i);
+                paginationContainer.appendChild(pageLink);
             }
-            
-            const response = await fetch('/api/v1/backup/folder', {
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+
+                const lastPage = createPreviewPageLink(totalPages);
+                paginationContainer.appendChild(lastPage);
+            }
+
+            // Next button
+            const nextLi = document.createElement('li');
+            nextLi.className = `page-item ${backupPreviewCurrentPage === totalPages ? 'disabled' : ''}`;
+            const nextLink = document.createElement('a');
+            nextLink.className = 'page-link';
+            nextLink.href = '#';
+            nextLink.textContent = 'Next';
+            nextLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (backupPreviewCurrentPage < totalPages) {
+                    backupPreviewCurrentPage++;
+                    renderPreviewTable();
+                }
+            });
+            nextLi.appendChild(nextLink);
+            paginationContainer.appendChild(nextLi);
+        }
+
+        // Helper function to create a page link for preview pagination
+        function createPreviewPageLink(pageNumber) {
+            const li = document.createElement('li');
+            li.className = `page-item ${pageNumber === backupPreviewCurrentPage ? 'active' : ''}`;
+
+            const link = document.createElement('a');
+            link.className = 'page-link';
+            link.href = '#';
+            link.textContent = pageNumber;
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                backupPreviewCurrentPage = pageNumber;
+                renderPreviewTable();
+            });
+
+            li.appendChild(link);
+            return li;
+        }
+
+        // Confirm and start the actual backup
+        async function confirmAndStartBackup() {
+            const backupName = document.getElementById('backup-name').value || 'backup';
+            const backupTargetName = document.getElementById('backup-target-name').value || 'backup_target';
+
+            // Hide the preview section
+            document.getElementById('backup-preview').style.display = 'none';
+
+            // Show the progress section
+            document.getElementById('backup-progress').style.display = 'block';
+
+            // Reset progress elements
+            document.getElementById('backup-progress-bar').style.width = '0%';
+            document.getElementById('backup-progress-text').textContent = '0/0';
+            document.getElementById('backup-status').textContent = 'Starting...';
+            document.getElementById('current-file').textContent = 'None';
+
+            // Get the backup type based on which preview was shown
+            // For simplicity, we'll assume ZIP if the ZIP path has a value, otherwise folder
+            const zipPath = document.getElementById('backup-zip-path').value;
+            const folderPath = document.getElementById('backup-folder-path').value;
+            const isZip = zipPath.trim() !== '';
+
+            const backupType = isZip ? 'zip' : 'folder';
+            const targetPath = isZip ? zipPath : folderPath;
+            const compressLevel = parseInt(document.getElementById('backup-zip-compress').value);
+            const maxZipSize = parseInt(document.getElementById('max-zip-size').value) * 1024 * 1024; // Convert MB to bytes
+
+            const filterInSelect = document.getElementById('backup-filter-in-select');
+            const filterOutSelect = document.getElementById('backup-filter-out-select');
+
+            let filterIn = [];
+            let filterOut = [];
+
+            // Get selected filter in values
+            for (let i = 0; i < filterInSelect.options.length; i++) {
+                if (filterInSelect.options[i].selected) {
+                    filterIn.push(filterInSelect.options[i].value);
+                }
+            }
+
+            // Get selected filter out values
+            for (let i = 0; i < filterOutSelect.options.length; i++) {
+                if (filterOutSelect.options[i].selected) {
+                    filterOut.push(filterOutSelect.options[i].value);
+                }
+            }
+
+            const response = await fetch(`/api/v1/backup/${backupType}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1418,18 +1749,137 @@
                     snapshot_filename: currentSnapshot,
                     target_path: targetPath,
                     filter_in: filterIn,
-                    filter_out: filterOut
+                    filter_out: filterOut,
+                    compress_level: compressLevel,
+                    dry_run: false,
+                    backup_name: backupName,
+                    backup_target_name: backupTargetName,
+                    max_file_size: maxZipSize
                 }),
                 credentials: 'same-origin'
             });
-            
+
             const data = await response.json();
-            
+
             if (response.ok) {
-                alert(`Folder backup created successfully: ${data.files_backed_up} files`);
+                backupTaskId = data.task_id;
+
+                // Start monitoring the backup progress
+                startBackupProgressMonitoring();
             } else {
                 alert('Backup failed: ' + data.error);
+                // Hide progress section
+                document.getElementById('backup-progress').style.display = 'none';
             }
+        }
+
+        // Start monitoring backup progress
+        function startBackupProgressMonitoring() {
+            if (backupInterval) {
+                clearInterval(backupInterval);
+            }
+
+            backupInterval = setInterval(async () => {
+                if (!backupTaskId) {
+                    clearInterval(backupInterval);
+                    return;
+                }
+
+                try {
+                    const response = await fetch(`/api/v1/backup/status/${backupTaskId}`, {
+                        method: 'GET',
+                        credentials: 'same-origin'
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        // Update progress bar
+                        const progressBar = document.getElementById('backup-progress-bar');
+                        progressBar.style.width = `${data.progress}%`;
+
+                        // Update progress text
+                        document.getElementById('backup-progress-text').textContent =
+                            `${data.completed_files}/${data.total_files}`;
+
+                        // Update status
+                        document.getElementById('backup-status').textContent = data.status;
+
+                        // Update current file
+                        if (data.current_file) {
+                            document.getElementById('current-file').textContent = data.current_file;
+                        }
+
+                        // If the task is completed, stop monitoring
+                        if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
+                            clearInterval(backupInterval);
+
+                            if (data.status === 'completed') {
+                                alert(`Backup completed successfully! ${data.completed_files} files backed up.`);
+                            } else if (data.status === 'error') {
+                                alert(`Backup failed: ${data.error}`);
+                            } else if (data.status === 'cancelled') {
+                                alert('Backup was cancelled.');
+                            }
+                        }
+                    } else {
+                        clearInterval(backupInterval);
+                        alert('Failed to get backup status');
+                    }
+                } catch (error) {
+                    clearInterval(backupInterval);
+                    console.error('Error checking backup status:', error);
+                }
+            }, 1000); // Check every second
+        }
+
+        // Cancel backup preview
+        function cancelPreview() {
+            document.getElementById('backup-preview').style.display = 'none';
+            backupPreviewData = null;
+        }
+
+        // Stop a running backup
+        async function stopBackup() {
+            if (!backupTaskId) return;
+
+            const response = await fetch(`/api/v1/backup/stop/${backupTaskId}`, {
+                method: 'POST',
+                credentials: 'same-origin'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                alert('Backup stopped successfully');
+                // Hide progress section
+                document.getElementById('backup-progress').style.display = 'none';
+
+                // Clear interval
+                if (backupInterval) {
+                    clearInterval(backupInterval);
+                }
+
+                backupTaskId = null;
+            } else {
+                alert('Failed to stop backup: ' + data.error);
+            }
+        }
+
+        // Create ZIP backup (updated to use new form fields)
+        async function createZipBackup() {
+            // This function is now called after dry run, so we'll call performDryRun first
+            // This function can be removed or can now call confirmAndStartBackup directly
+            // For now, let's make it do dry run as well to maintain the button's functionality
+            await performDryRun('zip');
+        }
+
+        // Create folder backup (updated to use new form fields)
+        async function createFolderBackup() {
+            // This function is now called after dry run, so we'll call performDryRun first
+            // This function can be removed or can now call confirmAndStartBackup directly
+            // For now, let's make it do dry run as well to maintain the button's functionality
+            await performDryRun('folder');
         }
         
         // Load groups for a snapshot
@@ -1466,16 +1916,40 @@
                 filterOutSelect.appendChild(option);
             });
 
-            // Update the backup filter select as well
-            const backupFilterSelect = document.getElementById('backup-filter-select');
-            backupFilterSelect.innerHTML = '';
+            // Update the backup filter in select
+            const backupFilterInSelect = document.getElementById('backup-filter-in-select');
+            backupFilterInSelect.innerHTML = '';
 
             data.groups.forEach(group => {
                 const option = document.createElement('option');
                 option.value = group.name;
                 option.textContent = group.name;
-                backupFilterSelect.appendChild(option);
+                backupFilterInSelect.appendChild(option);
             });
+
+            // Update the backup filter out select
+            const backupFilterOutSelect = document.getElementById('backup-filter-out-select');
+            backupFilterOutSelect.innerHTML = '';
+
+            data.groups.forEach(group => {
+                const option = document.createElement('option');
+                option.value = group.name;
+                option.textContent = group.name;
+                backupFilterOutSelect.appendChild(option);
+            });
+
+            // Update the old backup filter select for compatibility
+            const backupFilterSelect = document.getElementById('backup-filter-select');
+            if (backupFilterSelect) {
+                backupFilterSelect.innerHTML = '';
+
+                data.groups.forEach(group => {
+                    const option = document.createElement('option');
+                    option.value = group.name;
+                    option.textContent = group.name;
+                    backupFilterSelect.appendChild(option);
+                });
+            }
 
             // Update the groups list in the groups tab
             updateGroupsList();
