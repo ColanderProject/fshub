@@ -5,21 +5,19 @@ import os
 import json
 from datetime import datetime
 from ..config import Config
+from .explorer import loaded_snapshots
 
 group_bp = Blueprint('group_bp', __name__)
-
-# In-memory storage for groups (in production, this should be persistent)
-loaded_groups = {}  # Key: snapshot_filename, Value: {group_name: set of paths}
 
 
 @group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
 def get_groups(snapshot_filename):
     """Get all groups for a specific snapshot with file and directory counts"""
-    if snapshot_filename not in loaded_groups:
+    if snapshot_filename not in loaded_snapshots:
         # Load groups from file if not already loaded
-        load_groups_for_snapshot(snapshot_filename)
+        return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    snapshot_groups = loaded_groups.get(snapshot_filename, {})
+    snapshot_groups = loaded_snapshots.get(snapshot_filename, {}).get('groups', {})
     groups_with_counts = []
 
     for group_name, items in snapshot_groups.items():
@@ -47,16 +45,13 @@ def add_file_to_group(snapshot_filename):
         return jsonify({'error': 'Path and group name are required'}), 400
     
     # Add to in-memory storage
-    if snapshot_filename not in loaded_groups:
-        load_groups_for_snapshot(snapshot_filename)
+    if snapshot_filename not in loaded_snapshots:
+        return jsonify({'error': 'Snapshot not loaded'}), 400
     
-    if snapshot_filename not in loaded_groups:
-        loaded_groups[snapshot_filename] = {}
+    if group_name not in loaded_snapshots[snapshot_filename]['groups']:
+        loaded_snapshots[snapshot_filename]['groups'][group_name] = set()
     
-    if group_name not in loaded_groups[snapshot_filename]:
-        loaded_groups[snapshot_filename][group_name] = set()
-    
-    loaded_groups[snapshot_filename][group_name].add(f"f:{file_path}")
+    loaded_snapshots[snapshot_filename]['groups'][group_name].add(f"f:{file_path}")
     
     # Save to file
     save_group_action(snapshot_filename, file_path, 'f', group_name, 'add')
@@ -75,16 +70,13 @@ def add_dir_to_group(snapshot_filename):
         return jsonify({'error': 'Path and group name are required'}), 400
     
     # Add to in-memory storage
-    if snapshot_filename not in loaded_groups:
-        load_groups_for_snapshot(snapshot_filename)
+    if snapshot_filename not in loaded_snapshots:
+        return jsonify({'error': 'Snapshot not loaded'}), 400
+
+    if group_name not in loaded_snapshots[snapshot_filename]['groups']:
+        loaded_snapshots[snapshot_filename]['groups'][group_name] = set()
     
-    if snapshot_filename not in loaded_groups:
-        loaded_groups[snapshot_filename] = {}
-    
-    if group_name not in loaded_groups[snapshot_filename]:
-        loaded_groups[snapshot_filename][group_name] = set()
-    
-    loaded_groups[snapshot_filename][group_name].add(f"d:{dir_path}")
+    loaded_snapshots[snapshot_filename]['groups'][group_name].add(f"d:{dir_path}")
     
     # Save to file
     save_group_action(snapshot_filename, dir_path, 'd', group_name, 'add')
@@ -103,12 +95,11 @@ def remove_file_from_group(snapshot_filename):
         return jsonify({'error': 'Path and group name are required'}), 400
     
     # Remove from in-memory storage
-    if snapshot_filename not in loaded_groups:
-        load_groups_for_snapshot(snapshot_filename)
+    if snapshot_filename not in loaded_snapshots:
+        return jsonify({'error': 'Snapshot not loaded'}), 400
     
-    if (snapshot_filename in loaded_groups and 
-        group_name in loaded_groups[snapshot_filename]):
-        loaded_groups[snapshot_filename][group_name].discard(f"f:{file_path}")
+    if (group_name in loaded_snapshots[snapshot_filename]['groups']):
+        loaded_snapshots[snapshot_filename]['groups'][group_name].discard(f"f:{file_path}")
     
     # Save to file
     save_group_action(snapshot_filename, file_path, 'f', group_name, 'del')
@@ -127,12 +118,11 @@ def remove_dir_from_group(snapshot_filename):
         return jsonify({'error': 'Path and group name are required'}), 400
     
     # Remove from in-memory storage
-    if snapshot_filename not in loaded_groups:
-        load_groups_for_snapshot(snapshot_filename)
+    if snapshot_filename not in loaded_snapshots:
+        return jsonify({'error': 'Snapshot not loaded'}), 400
     
-    if (snapshot_filename in loaded_groups and 
-        group_name in loaded_groups[snapshot_filename]):
-        loaded_groups[snapshot_filename][group_name].discard(f"d:{dir_path}")
+    if (group_name in loaded_snapshots[snapshot_filename]['groups']):
+        loaded_snapshots[snapshot_filename]['groups'][group_name].discard(f"d:{dir_path}")
     
     # Save to file
     save_group_action(snapshot_filename, dir_path, 'd', group_name, 'del')
@@ -148,10 +138,10 @@ def get_files_in_group(snapshot_filename):
     if not group_name:
         return jsonify({'error': 'Group name is required'}), 400
     
-    if snapshot_filename not in loaded_groups:
-        load_groups_for_snapshot(snapshot_filename)
+    if snapshot_filename not in loaded_snapshots:
+        return jsonify({'error': 'Snapshot not loaded'}), 400
     
-    group_items = loaded_groups.get(snapshot_filename, {}).get(group_name, set())
+    group_items = loaded_snapshots.get(snapshot_filename, {})['groups'].get(group_name, set())
     
     files = []
     dirs = []
@@ -167,42 +157,6 @@ def get_files_in_group(snapshot_filename):
         'files': files,
         'dirs': dirs
     })
-
-
-def load_groups_for_snapshot(snapshot_filename):
-    """Load groups for a specific snapshot from file"""
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
-    
-    # Create the groups filename based on the snapshot filename
-    base_name = snapshot_filename.replace('.jsonl.gz', '')
-    groups_filename = f"{base_name}_groups.jl"
-    groups_filepath = os.path.join(snapshot_dir, groups_filename)
-    
-    if not os.path.exists(groups_filepath):
-        loaded_groups[snapshot_filename] = {}
-        return
-    
-    groups_dict = {}
-    
-    with open(groups_filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                action = json.loads(line)
-                path, item_type, group_name, action_type, timestamp = action
-                
-                full_path = f"{item_type}:{path}"
-                
-                if group_name not in groups_dict:
-                    groups_dict[group_name] = set()
-                
-                if action_type == 'add':
-                    groups_dict[group_name].add(full_path)
-                elif action_type == 'del':
-                    groups_dict[group_name].discard(full_path)
-    
-    loaded_groups[snapshot_filename] = groups_dict
-
 
 def save_group_action(snapshot_filename, path, item_type, group_name, action_type):
     """Save a group action to file"""
