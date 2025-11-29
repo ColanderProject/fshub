@@ -117,6 +117,7 @@
                                     <th>Created</th>
                                     <th>Modified</th>
                                     <th>Accessed</th>
+                                    <th>Groups</th>
                                 </tr>
                             </thead>
                             <tbody id="dirs-tbody">
@@ -135,6 +136,7 @@
                                     <th>Created</th>
                                     <th>Modified</th>
                                     <th>Accessed</th>
+                                    <th>Groups</th>
                                 </tr>
                             </thead>
                             <tbody id="files-tbody">
@@ -683,6 +685,7 @@
                     // Add click handler for navigation
                     nameLink.addEventListener('click', (e) => {
                         e.preventDefault();
+                        e.stopPropagation();
                         const newPath = currentPath === '/'
                             ? `/${dir.name}`
                             : `${currentPath}/${dir.name}`;
@@ -702,6 +705,37 @@
                     row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
+
+                    // Create Groups cell with links to add to default groups
+                    const groupsCell = document.createElement('td');
+                    const fullDirPath = currentPath === '/' ? `/${dir.name}` : `${currentPath}/${dir.name}`;
+                    const groupLinks = [];
+
+                    defaultGroups.forEach(group => {
+                        const link = document.createElement('a');
+                        link.href = '#';
+                        link.textContent = group;
+                        link.style.marginRight = '5px';
+                        link.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            addItemToGroup(fullDirPath, 'd', group);
+                        });
+                        groupLinks.push(link);
+                    });
+
+                    if (groupLinks.length > 0) {
+                        groupsCell.appendChild(document.createTextNode('Add to: '));
+                        groupLinks.forEach((link, index) => {
+                            groupsCell.appendChild(link);
+                            if (index < groupLinks.length - 1) {
+                                groupsCell.appendChild(document.createTextNode(', '));
+                            }
+                        });
+                    } else {
+                        groupsCell.textContent = 'No groups available';
+                    }
+
+                    row.appendChild(groupsCell);
 
                     dirsTbody.appendChild(row);
                 });
@@ -733,6 +767,37 @@
                     row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(file.modified) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(file.accessed) || 'N/A'));
+
+                    // Create Groups cell with links to add to default groups
+                    const groupsCell = document.createElement('td');
+                    const fullFilePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                    const groupLinks = [];
+
+                    defaultGroups.forEach(group => {
+                        const link = document.createElement('a');
+                        link.href = '#';
+                        link.textContent = group;
+                        link.style.marginRight = '5px';
+                        link.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            addItemToGroup(fullFilePath, 'f', group);
+                        });
+                        groupLinks.push(link);
+                    });
+
+                    if (groupLinks.length > 0) {
+                        groupsCell.appendChild(document.createTextNode('Add to: '));
+                        groupLinks.forEach((link, index) => {
+                            groupsCell.appendChild(link);
+                            if (index < groupLinks.length - 1) {
+                                groupsCell.appendChild(document.createTextNode(', '));
+                            }
+                        });
+                    } else {
+                        groupsCell.textContent = 'No groups available';
+                    }
+
+                    row.appendChild(groupsCell);
 
                     filesTbody.appendChild(row);
                 });
@@ -1364,22 +1429,63 @@
             });
         }
         
+        // Add an item to a group
+        async function addItemToGroup(itemPath, itemType, groupName) {
+            if (!currentSnapshot) {
+                alert('Please select a snapshot first');
+                return;
+            }
+
+            // Determine the correct endpoint based on item type
+            let endpoint;
+            if (itemType === 'f') {
+                endpoint = `/api/v1/group/${currentSnapshot}/add_file`;
+            } else if (itemType === 'd') {
+                endpoint = `/api/v1/group/${currentSnapshot}/add_dir`;
+            } else {
+                alert('Invalid item type. Must be "f" for file or "d" for directory');
+                return;
+            }
+
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    path: itemPath,
+                    group_name: groupName
+                }),
+                credentials: 'same-origin'
+            });
+
+            const data = await response.json();
+
+            if (response.ok) {
+                alert(`Item added to group "${groupName}" successfully!`);
+                // Optionally, reload the current path to reflect the change
+                await loadPath(currentSnapshot, currentPath);
+            } else {
+                alert('Failed to add item to group: ' + (data.error || 'Unknown error'));
+            }
+        }
+
         // Create a new group
         async function createGroup() {
             const groupName = document.getElementById('new-group-name').value;
-            
+
             if (!groupName) {
                 alert('Please enter a group name');
                 return;
             }
-            
+
             // For now, just add it to the default groups in the UI
             // In a real implementation, we would create it via API
             if (!defaultGroups.includes(groupName)) {
                 defaultGroups.push(groupName);
                 updateDefaultGroupsUI();
             }
-            
+
             document.getElementById('new-group-name').value = '';
         }
         
