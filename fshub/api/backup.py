@@ -205,31 +205,40 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level, ma
         # Create target directory if it doesn't exist
         os.makedirs(target_path, exist_ok=True)
 
-        # Prepare files with cumulative size for chunking
-        total_size = sum(f.get('size', 0) for f in files_to_backup)
-
         # Process files in chunks based on max_file_size
         files_processed = 0
-        file_index = 0
         zip_index = 0
 
         while files_processed < len(files_to_backup):
             # Create a new zip file for this chunk
-            zip_filename = f"{os.path.join(target_path, os.path.splitext(os.path.basename(target_path))[0] if os.path.isdir(target_path) else os.path.splitext(target_path)[0])}_{zip_index:03d}.zip"
+            # If target_path is a directory, use backup name in filename; otherwise use base of target path
+            if os.path.isdir(target_path):
+                zip_filename = os.path.join(target_path, f"backup_{zip_index:03d}.zip")
+            else:
+                base_name = os.path.splitext(os.path.basename(target_path))[0]
+                zip_filename = f"{base_name}_{zip_index:03d}.zip" if zip_index > 0 else target_path
 
             with zipfile.ZipFile(zip_filename, 'w', compression=compression_method, compresslevel=compress_level) as zipf:
                 chunk_size = 0
-                chunk_files = []
 
-                # Add files to this zip until we hit the size limit
-                while files_processed < len(files_to_backup) and chunk_size < max_file_size:
+                # Add files to this zip until we hit the size limit or run out of files
+                while files_processed < len(files_to_backup):
                     file_info = files_to_backup[files_processed]
                     file_size = file_info.get('size', 0)
 
+                    # Check if adding this file would exceed the size limit (for second+ zip files)
+                    if chunk_size > 0 and chunk_size + file_size > max_file_size:
+                        # This file will go to the next zip file
+                        break
+
+                    # Add the full path inside the zip to maintain directory structure
+                    # Use the full path from the snapshot, not just the filename
+                    zip_path = file_info['full_path'].lstrip('/')  # Remove leading slash to avoid absolute paths
+
                     # For dry run simulation, skip actual file processing
                     # In a real implementation, we would read from the original location
-                    # For now, just simulate the backup process
-                    zipf.writestr(f"backup/{file_info['name']}", f"Content of {file_info['name']}")  # Placeholder content
+                    # For now, just simulate the backup process by adding placeholder content
+                    zipf.writestr(zip_path, f"Content of {file_info['full_path']}")  # Placeholder content
 
                     # Log the backup operation
                     with open(log_path, 'a') as log_file:
@@ -243,13 +252,12 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level, ma
                         log_file.write(json.dumps(log_entry) + '\n')
 
                     chunk_size += file_size
-                    chunk_files.append(file_info)
                     files_processed += 1
 
                     # Update task progress
                     backup_tasks[task_id]['completed_files'] = files_processed
                     backup_tasks[task_id]['progress'] = int((files_processed / len(files_to_backup)) * 100)
-                    backup_tasks[task_id]['current_file'] = file_info['name']
+                    backup_tasks[task_id]['current_file'] = file_info['full_path']
 
                     # Check if task was stopped
                     if backup_tasks[task_id]['status'] == 'stopped':
@@ -275,20 +283,26 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log_path):
         os.makedirs(target_path, exist_ok=True)
 
         for i, file_info in enumerate(files_to_backup):
-            # In a real implementation, this would copy the actual file
-            # For now, we'll simulate the process
-
             # Calculate progress
             backup_tasks[task_id]['completed_files'] = i + 1
             backup_tasks[task_id]['progress'] = int(((i + 1) / len(files_to_backup)) * 100)
-            backup_tasks[task_id]['current_file'] = file_info['name']
+            backup_tasks[task_id]['current_file'] = file_info['full_path']
+
+            # Create the full destination path maintaining directory structure
+            # Remove leading slash from full_path to create relative path
+            relative_path = file_info['full_path'].lstrip('/')
+            dest_full_path = os.path.join(target_path, relative_path)
+
+            # Create parent directories if they don't exist
+            dest_dir = os.path.dirname(dest_full_path)
+            os.makedirs(dest_dir, exist_ok=True)
 
             # Log the backup operation
             with open(log_path, 'a') as log_file:
                 log_entry = {
                     'timestamp': int(time.time()),
                     'src_path': file_info['full_path'],
-                    'dest_path': os.path.join(target_path, file_info['name']),
+                    'dest_path': dest_full_path,
                     'filesize': file_info.get('size', 0),
                     'action': 'backup'
                 }
