@@ -57,28 +57,29 @@ def get_path():
     path = request.args.get('path', None)
     index = request.args.get('index', None, type=int)
     use_filter = request.args.get('use_filter', default=False, type=lambda x: x.lower() == 'true')
+    recursive_calc = request.args.get('recursive_calc', default=False, type=lambda x: x.lower() == 'true')
     filter_in = request.args.get('filter_in', default='[]')
     filter_out = request.args.get('filter_out', default='[]')
-    
+
     try:
         filter_in = json.loads(filter_in) if filter_in else []
         filter_out = json.loads(filter_out) if filter_out else []
     except json.JSONDecodeError:
         return jsonify({'error': 'Invalid filter format'}), 400
-    
+
     if not snapshot_filename:
         return jsonify({'error': 'Snapshot filename is required'}), 400
-    
+
     # Use either path or index, not both
     if path is not None and index is not None:
         return jsonify({'error': 'Cannot specify both path and index'}), 400
-    
+
     if snapshot_filename not in loaded_snapshots:
         # if not load_snapshot_file(snapshot_filename):
         return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
-    
+
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    
+
     path_obj = None
     if path is not None:
         # Find the path in the snapshot
@@ -88,13 +89,13 @@ def get_path():
     elif index is not None:
         if 0 <= index < len(snapshot_data):
             path_obj = snapshot_data[index]
-    
+
     if path_obj is None:
         return jsonify({'error': 'Path not found'}), 404
-    
+
     # Apply filters if requested
     if use_filter:
-        return jsonify(filter_path_content(path_obj, snapshot_filename, filter_in, filter_out))
+        return jsonify(filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc))
     else:
         return jsonify(format_path_content(path_obj, snapshot_filename))
 
@@ -340,7 +341,7 @@ def format_path_content(path_obj, snapshot_filename):
     }
 
 
-def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
+def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc=False):
     """Filter path content based on groups"""
     groups_dict = loaded_snapshots[snapshot_filename]['groups']
 
@@ -427,11 +428,22 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
             subdir_idx = loaded_snapshots[snapshot_filename]['index'][subdir_path]
             subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
 
-            dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
-            dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
-            dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
-            dir_info['file_count'] = subdir_obj.get('C', 0)
-
+            if recursive_calc:
+                # Calculate filtered sizes and counts recursively based on the filters
+                filtered_size, filtered_count = calculate_filtered_recursive_totals(
+                    subdir_obj, snapshot_filename, filter_in, filter_out
+                )
+                dir_info['S'] = filtered_size
+                dir_info['C'] = filtered_count
+                dir_info['size_formatted'] = format_bytes(filtered_size)
+                dir_info['file_count'] = filtered_count
+            else:
+                dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
+                dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
+                dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
+                dir_info['file_count'] = subdir_obj.get('C', 0)
+        else:
+            print("Subdirectory path not found in index:", subdir_path)
         filtered_dirs.append(dir_info)
 
     return {
@@ -440,3 +452,59 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out):
         'dirs': filtered_dirs,
         'filtered': True
     }
+
+
+def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
+    """Recursively calculate total size and file count for a directory and its subdirectories based on filters"""
+    groups_dict = loaded_snapshots[snapshot_filename]['groups']
+
+    # Start with files directly in this directory that pass the filter
+    total_size = 0
+    total_count = 0
+
+    for i, filename in enumerate(path_obj.get('f', [])):
+        file_path = os.path.join(path_obj['p'], filename)
+        # Check if file should be filtered out
+        should_filter_out = False
+        for group_name in filter_out:
+            if (group_name in groups_dict and
+                file_path in groups_dict[group_name]['f']):
+                should_filter_out = True
+                break
+
+        if should_filter_out:
+            continue
+
+        # If filter_in is specified, only include files in those groups
+        should_include = True
+        if filter_in:
+            should_include = False
+            for group_name in filter_in:
+                if (group_name in groups_dict and
+                    file_path in groups_dict[group_name]['f']):
+                    should_include = True
+                    break
+
+        if should_include:
+            size = path_obj['s'][i] if i < len(path_obj['s']) else 0
+            total_size += size
+            total_count += 1
+
+    # Process all subdirectories of the current path
+    path_index = loaded_snapshots[snapshot_filename]['index']
+    for dirname in path_obj.get('d', []):
+        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+        if subdir_path in path_index:
+            subdir_idx = path_index[subdir_path]
+            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
+
+            # Recursively calculate for the subdirectory
+            subdir_total_size, subdir_total_count = calculate_filtered_recursive_totals(
+                subdir_obj, snapshot_filename, filter_in, filter_out
+            )
+
+            # Add the subdirectory's totals to the current directory's totals
+            total_size += subdir_total_size
+            total_count += subdir_total_count
+
+    return total_size, total_count

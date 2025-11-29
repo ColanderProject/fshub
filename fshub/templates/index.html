@@ -101,6 +101,10 @@
                             <input class="form-check-input" type="checkbox" id="use-filter-check">
                             <label class="form-check-label" for="use-filter-check">Use Filter</label>
                         </div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" id="recursive-calc-check" disabled>
+                            <label class="form-check-label" for="recursive-calc-check">Recalculate sizes & counts based on filter</label>
+                        </div>
                     </div>
                     
                     <div>
@@ -421,6 +425,16 @@
                 }
             });
 
+            // Add event listener for use filter checkbox to enable recursive calc checkbox
+            document.getElementById('use-filter-check').addEventListener('change', function() {
+                const recursiveCalcCheck = document.getElementById('recursive-calc-check');
+                recursiveCalcCheck.disabled = !this.checked;
+                // Reset the recursive calculation checkbox when filter is disabled
+                if (!this.checked) {
+                    recursiveCalcCheck.checked = false;
+                }
+            });
+
             // Load initial data
             loadSnapshots();
             loadDevices();
@@ -669,7 +683,8 @@
             const params = new URLSearchParams({
                 snapshot: snapshot,
                 path: path,
-                use_filter: useFilterCheck.checked
+                use_filter: useFilterCheck.checked,
+                recursive_calc: document.getElementById('recursive-calc-check').checked
             });
 
             if (filterIn.length > 0) {
