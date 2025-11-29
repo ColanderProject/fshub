@@ -492,6 +492,7 @@
         let backupPreviewItemsPerPage = 50;
         let backupTaskId = null; // Current backup task ID
         let backupInterval = null; // Interval for checking backup progress
+        let backupType = null; // Current backup type (zip or folder)
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -1458,8 +1459,11 @@
         }
         
         // Perform dry run
-        async function performDryRun(backupType) {
-            const targetPath = backupType === 'zip'
+        async function performDryRun(backupTypeParam) {
+            // Set the global backup type variable
+            backupType = backupTypeParam;
+
+            const targetPath = backupTypeParam === 'zip'
                 ? document.getElementById('backup-zip-path').value
                 : document.getElementById('backup-folder-path').value;
             const compressLevel = parseInt(document.getElementById('backup-zip-compress').value);
@@ -1492,7 +1496,7 @@
                 return;
             }
 
-            const response = await fetch(`/api/v1/backup/${backupType}`, {
+            const response = await fetch(`/api/v1/backup/${backupTypeParam}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -1709,14 +1713,14 @@
             document.getElementById('backup-status').textContent = 'Starting...';
             document.getElementById('current-file').textContent = 'None';
 
-            // Get the backup type based on which preview was shown
-            // For simplicity, we'll assume ZIP if the ZIP path has a value, otherwise folder
-            const zipPath = document.getElementById('backup-zip-path').value;
-            const folderPath = document.getElementById('backup-folder-path').value;
-            const isZip = zipPath.trim() !== '';
+            // Use the global backupType variable that was set when the preview was initiated
+            const currentBackupType = backupType;
 
-            const backupType = isZip ? 'zip' : 'folder';
-            const targetPath = isZip ? zipPath : folderPath;
+            // Get the appropriate target path based on the backup type
+            const targetPath = currentBackupType === 'zip'
+                ? document.getElementById('backup-zip-path').value
+                : document.getElementById('backup-folder-path').value;
+
             const compressLevel = parseInt(document.getElementById('backup-zip-compress').value);
             const maxZipSize = parseInt(document.getElementById('max-zip-size').value) * 1024 * 1024; // Convert MB to bytes
 
@@ -1740,7 +1744,7 @@
                 }
             }
 
-            const response = await fetch(`/api/v1/backup/${backupType}`, {
+            const response = await fetch(`/api/v1/backup/${currentBackupType}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
