@@ -114,16 +114,40 @@
                     </div>
 
                     <div id="dirs-container">
+                        <div class="row mb-2">
+                            <div class="col-md-6">
+                                <input type="text" class="form-control" id="dirs-filter" placeholder="Filter directories...">
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select" id="dirs-sort">
+                                    <option value="name">Sort by Name</option>
+                                    <option value="size" selected>Sort by Size</option>
+                                    <option value="files">Sort by Files</option>
+                                    <option value="created">Sort by Created</option>
+                                    <option value="modified">Sort by Modified</option>
+                                    <option value="accessed">Sort by Accessed</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select" id="dirs-pagesize">
+                                    <option value="10">10 per page</option>
+                                    <option value="20">20 per page</option>
+                                    <option value="50">50 per page</option>
+                                    <option value="100">100 per page</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <h5>Directories</h5>
                         <table class="table table-striped dir-table">
                             <thead>
                                 <tr>
-                                    <th>Name</th>
-                                    <th>Total Size</th>
-                                    <th>Total Files</th>
-                                    <th>Created</th>
-                                    <th>Modified</th>
-                                    <th>Accessed</th>
+                                    <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="size">Total Size <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="files">Total Files <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
                                     <th>Groups</th>
                                 </tr>
                             </thead>
@@ -131,18 +155,47 @@
                                 <!-- Directory rows will be populated here -->
                             </tbody>
                         </table>
+
+                        <nav aria-label="Directories pagination">
+                            <ul class="pagination justify-content-center" id="dirs-pagination">
+                                <!-- Directory pagination will be populated here -->
+                            </ul>
+                        </nav>
                     </div>
-                    
+
                     <div id="files-container">
+                        <div class="row mb-2">
+                            <div class="col-md-6">
+                                <input type="text" class="form-control" id="files-filter" placeholder="Filter files...">
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select" id="files-sort">
+                                    <option value="name">Sort by Name</option>
+                                    <option value="size" selected>Sort by Size</option>
+                                    <option value="created">Sort by Created</option>
+                                    <option value="modified">Sort by Modified</option>
+                                    <option value="accessed">Sort by Accessed</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <select class="form-select" id="files-pagesize">
+                                    <option value="10">10 per page</option>
+                                    <option value="20">20 per page</option>
+                                    <option value="50">50 per page</option>
+                                    <option value="100">100 per page</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <h5>Files</h5>
                         <table class="table table-striped file-table">
                             <thead>
                                 <tr>
-                                    <th>Name</th>
-                                    <th>Size</th>
-                                    <th>Created</th>
-                                    <th>Modified</th>
-                                    <th>Accessed</th>
+                                    <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="size">Size <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
                                     <th>Groups</th>
                                 </tr>
                             </thead>
@@ -150,6 +203,12 @@
                                 <!-- File rows will be populated here -->
                             </tbody>
                         </table>
+
+                        <nav aria-label="Files pagination">
+                            <ul class="pagination justify-content-center" id="files-pagination">
+                                <!-- Files pagination will be populated here -->
+                            </ul>
+                        </nav>
                     </div>
                 </div>
             </div>
@@ -498,7 +557,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             // Check login status
             checkLoginStatus();
-            
+
             // Setup event listeners
             document.getElementById('login-btn').addEventListener('click', showLoginModal);
             document.getElementById('do-login').addEventListener('click', performLogin);
@@ -548,6 +607,9 @@
                     recursiveCalcCheck.checked = false;
                 }
             });
+
+            // Initialize explorer functionality
+            initializeExplorer();
 
             // Load initial data
             loadSnapshots();
@@ -820,139 +882,17 @@
                 currentPath = data.current_path;
                 updateBreadcrumb(currentPath);
 
-                // Update directories table
-                const dirsTbody = document.getElementById('dirs-tbody');
-                dirsTbody.innerHTML = '';
+                // Store original data for sorting, filtering, and paging
+                originalDirs = [...data.dirs];
+                originalFiles = [...data.files];
 
-                data.dirs.forEach(dir => {
-                    const row = document.createElement('tr');
+                // Reset pagination
+                currentDirsPage = 1;
+                currentFilesPage = 1;
 
-                    // Create clickable directory name
-                    const nameCell = document.createElement('td');
-                    nameCell.className = 'filename-cell';
-                    const nameLink = document.createElement('a');
-                    nameLink.href = '#';
-                    nameLink.textContent = dir.name;
-                    nameLink.title = dir.name; // Show full name on hover
-                    // Add click handler for navigation
-                    nameLink.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const newPath = currentPath === '/'
-                            ? `/${dir.name}`
-                            : `${currentPath}/${dir.name}`;
-                        loadPath(snapshot, newPath);
-                    });
-                    // Add click handler to show full filename in popup
-                    nameCell.addEventListener('click', (e) => {
-                        if (e.target === nameCell || e.target === nameLink) {
-                            showFullFilenamePopup(dir.name);
-                        }
-                    });
-                    nameCell.appendChild(nameLink);
-
-                    row.appendChild(nameCell);
-                    row.appendChild(createTextCell(formatBytes(dir.S) || '0 Bytes')); // Total Size
-                    row.appendChild(createTextCell(dir.C || 0)); // Total Files
-                    row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
-                    row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
-                    row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
-
-                    // Create Groups cell with links to add to default groups
-                    const groupsCell = document.createElement('td');
-                    const fullDirPath = currentPath === '/' ? `/${dir.name}` : `${currentPath}/${dir.name}`;
-                    const groupLinks = [];
-
-                    defaultGroups.forEach(group => {
-                        const link = document.createElement('a');
-                        link.href = '#';
-                        link.textContent = group;
-                        link.style.marginRight = '5px';
-                        link.addEventListener('click', (e) => {
-                            e.preventDefault();
-                            addItemToGroup(fullDirPath, 'd', group);
-                        });
-                        groupLinks.push(link);
-                    });
-
-                    if (groupLinks.length > 0) {
-                        groupsCell.appendChild(document.createTextNode('Add to: '));
-                        groupLinks.forEach((link, index) => {
-                            groupsCell.appendChild(link);
-                            if (index < groupLinks.length - 1) {
-                                groupsCell.appendChild(document.createTextNode(', '));
-                            }
-                        });
-                    } else {
-                        groupsCell.textContent = 'No groups available';
-                    }
-
-                    row.appendChild(groupsCell);
-
-                    dirsTbody.appendChild(row);
-                });
-
-                // Update files table
-                const filesTbody = document.getElementById('files-tbody');
-                filesTbody.innerHTML = '';
-
-                data.files.forEach(file => {
-                    const row = document.createElement('tr');
-
-                    // Create file name cell
-                    const nameCell = document.createElement('td');
-                    nameCell.className = 'filename-cell';
-                    nameCell.textContent = file.name;
-                    nameCell.title = file.name; // Show full name on hover
-                    // Add click handler to show full filename in popup
-                    nameCell.addEventListener('click', (e) => {
-                        showFullFilenamePopup(file.name);
-                    });
-                    row.appendChild(nameCell);
-
-                    // Size cell
-                    const sizeCell = document.createElement('td');
-                    sizeCell.textContent = file.size_formatted;
-                    row.appendChild(sizeCell);
-
-                    // Timestamp cells
-                    row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));
-                    row.appendChild(createTextCell(formatTimestamp(file.modified) || 'N/A'));
-                    row.appendChild(createTextCell(formatTimestamp(file.accessed) || 'N/A'));
-
-                    // Create Groups cell with links to add to default groups
-                    const groupsCell = document.createElement('td');
-                    const fullFilePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-                    const groupLinks = [];
-
-                    defaultGroups.forEach(group => {
-                        const link = document.createElement('a');
-                        link.href = '#';
-                        link.textContent = group;
-                        link.style.marginRight = '5px';
-                        link.addEventListener('click', (e) => {
-                            e.preventDefault();
-                            addItemToGroup(fullFilePath, 'f', group);
-                        });
-                        groupLinks.push(link);
-                    });
-
-                    if (groupLinks.length > 0) {
-                        groupsCell.appendChild(document.createTextNode('Add to: '));
-                        groupLinks.forEach((link, index) => {
-                            groupsCell.appendChild(link);
-                            if (index < groupLinks.length - 1) {
-                                groupsCell.appendChild(document.createTextNode(', '));
-                            }
-                        });
-                    } else {
-                        groupsCell.textContent = 'No groups available';
-                    }
-
-                    row.appendChild(groupsCell);
-
-                    filesTbody.appendChild(row);
-                });
+                // Apply initial sorting (default is size descending)
+                sortDirectories(dirsSortColumn);
+                sortFiles(filesSortColumn);
             } else {
                 console.error('Failed to load path:', data.error);
             }
@@ -2465,12 +2405,626 @@
         // Helper to format bytes
         function formatBytes(bytes) {
             if (bytes === 0) return '0 Bytes';
-            
+
             const k = 1024;
             const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
             const i = Math.floor(Math.log(bytes) / Math.log(k));
-            
+
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Sorting, filtering, and paging variables
+        let currentDirsPage = 1;
+        let currentFilesPage = 1;
+        let dirsPerPage = 10;
+        let filesPerPage = 10;
+        let dirsSortColumn = 'size';
+        let filesSortColumn = 'size';
+        let dirsSortDirection = 'desc';  // Default to descending (large to small)
+        let filesSortDirection = 'desc';
+        let originalDirs = []; // Cache of original directories
+        let originalFiles = []; // Cache of original files
+
+        // Initialize the explorer functionality
+        function initializeExplorer() {
+            // Set default sort options
+            document.getElementById('dirs-sort').value = dirsSortColumn;
+            document.getElementById('files-sort').value = filesSortColumn;
+            document.getElementById('dirs-pagesize').value = dirsPerPage;
+            document.getElementById('files-pagesize').value = filesPerPage;
+
+            // Add event listeners for sorting
+            const dirHeaders = document.querySelectorAll('#dirs-container .sortable-header');
+            dirHeaders.forEach(header => {
+                header.addEventListener('click', () => {
+                    const column = header.getAttribute('data-column');
+                    sortDirectories(column);
+                });
+            });
+
+            const fileHeaders = document.querySelectorAll('#files-container .sortable-header');
+            fileHeaders.forEach(header => {
+                header.addEventListener('click', () => {
+                    const column = header.getAttribute('data-column');
+                    sortFiles(column);
+                });
+            });
+
+            // Add event listeners for filter inputs
+            document.getElementById('dirs-filter').addEventListener('input', filterAndRenderDirectories);
+            document.getElementById('files-filter').addEventListener('input', filterAndRenderFiles);
+
+            // Add event listeners for sort selection
+            document.getElementById('dirs-sort').addEventListener('change', () => {
+                dirsSortColumn = document.getElementById('dirs-sort').value;
+                sortDirectories(dirsSortColumn);
+            });
+
+            document.getElementById('files-sort').addEventListener('change', () => {
+                filesSortColumn = document.getElementById('files-sort').value;
+                sortFiles(filesSortColumn);
+            });
+
+            // Add event listeners for page size selection
+            document.getElementById('dirs-pagesize').addEventListener('change', () => {
+                dirsPerPage = parseInt(document.getElementById('dirs-pagesize').value);
+                currentDirsPage = 1; // Reset to first page
+                renderDirectoryTable();
+            });
+
+            document.getElementById('files-pagesize').addEventListener('change', () => {
+                filesPerPage = parseInt(document.getElementById('files-pagesize').value);
+                currentFilesPage = 1; // Reset to first page
+                renderFileTable();
+            });
+        }
+
+        // Sorting functions
+        function sortDirectories(column) {
+            if (column === dirsSortColumn) {
+                // If clicking the same column, toggle sort direction
+                dirsSortDirection = dirsSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                // If clicking a new column, default to descending, but for size default to descending (large to small)
+                dirsSortColumn = column;
+                dirsSortDirection = (column === 'size') ? 'desc' : 'desc';
+            }
+
+            // Update sort indicator in UI
+            updateSortIndicators('#dirs-container', column, dirsSortDirection);
+
+            // Sort the directories array
+            originalDirs.sort((a, b) => {
+                let valA, valB;
+
+                switch (column) {
+                    case 'name':
+                        valA = a.name.toLowerCase();
+                        valB = b.name.toLowerCase();
+                        if (dirsSortDirection === 'asc') {
+                            return valA.localeCompare(valB);
+                        } else {
+                            return valB.localeCompare(valA);
+                        }
+                    case 'size':
+                        valA = a.S || 0;
+                        valB = b.S || 0;
+                        if (dirsSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'files':
+                        valA = a.C || 0;
+                        valB = b.C || 0;
+                        if (dirsSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'created':
+                        valA = new Date(a.created).getTime();
+                        valB = new Date(b.created).getTime();
+                        if (dirsSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'modified':
+                        valA = new Date(a.modified).getTime();
+                        valB = new Date(b.modified).getTime();
+                        if (dirsSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'accessed':
+                        valA = new Date(a.accessed).getTime();
+                        valB = new Date(b.accessed).getTime();
+                        if (dirsSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                }
+            });
+
+            // Update the sort dropdown
+            document.getElementById('dirs-sort').value = column;
+
+            // Render the directory table
+            renderDirectoryTable();
+        }
+
+        function sortFiles(column) {
+            if (column === filesSortColumn) {
+                // If clicking the same column, toggle sort direction
+                filesSortDirection = filesSortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                // If clicking a new column, default to descending, but for size default to descending (large to small)
+                filesSortColumn = column;
+                filesSortDirection = (column === 'size') ? 'desc' : 'desc';
+            }
+
+            // Update sort indicator in UI
+            updateSortIndicators('#files-container', column, filesSortDirection);
+
+            // Sort the files array
+            originalFiles.sort((a, b) => {
+                let valA, valB;
+
+                switch (column) {
+                    case 'name':
+                        valA = a.name.toLowerCase();
+                        valB = b.name.toLowerCase();
+                        if (filesSortDirection === 'asc') {
+                            return valA.localeCompare(valB);
+                        } else {
+                            return valB.localeCompare(valA);
+                        }
+                    case 'size':
+                        valA = a.size || 0;
+                        valB = b.size || 0;
+                        if (filesSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'created':
+                        valA = new Date(a.created).getTime();
+                        valB = new Date(b.created).getTime();
+                        if (filesSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'modified':
+                        valA = new Date(a.modified).getTime();
+                        valB = new Date(b.modified).getTime();
+                        if (filesSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                    case 'accessed':
+                        valA = new Date(a.accessed).getTime();
+                        valB = new Date(b.accessed).getTime();
+                        if (filesSortDirection === 'asc') {
+                            return valA - valB;
+                        } else {
+                            return valB - valA;
+                        }
+                }
+            });
+
+            // Update the sort dropdown
+            document.getElementById('files-sort').value = column;
+
+            // Render the file table
+            renderFileTable();
+        }
+
+        // Update sort indicators in the UI
+        function updateSortIndicators(container, activeColumn, direction) {
+            // Clear all indicators in the container
+            const indicators = document.querySelectorAll(`${container} .sort-indicator`);
+            indicators.forEach(indicator => indicator.textContent = '');
+
+            // Set the active indicator
+            const activeHeader = document.querySelector(`${container} th[data-column="${activeColumn}"] .sort-indicator`);
+            if (activeHeader) {
+                activeHeader.textContent = direction === 'asc' ? '↑' : '↓';
+            }
+        }
+
+        // Filtering functions
+        function filterAndRenderDirectories() {
+            currentDirsPage = 1; // Reset to first page when filtering
+            renderDirectoryTable();
+        }
+
+        function filterAndRenderFiles() {
+            currentFilesPage = 1; // Reset to first page when filtering
+            renderFileTable();
+        }
+
+        // Rendering functions
+        function renderDirectoryTable() {
+            const filterText = document.getElementById('dirs-filter').value.toLowerCase();
+
+            // Filter directories based on the input
+            const filteredDirs = originalDirs.filter(dir =>
+                dir.name.toLowerCase().includes(filterText)
+            );
+
+            // Calculate pagination
+            const startIndex = (currentDirsPage - 1) * dirsPerPage;
+            const endIndex = Math.min(startIndex + dirsPerPage, filteredDirs.length);
+            const dirsForPage = filteredDirs.slice(startIndex, endIndex);
+
+            // Render directories table
+            const dirsTbody = document.getElementById('dirs-tbody');
+            dirsTbody.innerHTML = '';
+
+            if (dirsForPage.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.setAttribute('colspan', '7');
+                cell.textContent = 'No directories match the filter.';
+                cell.className = 'text-center';
+                row.appendChild(cell);
+                dirsTbody.appendChild(row);
+            } else {
+                dirsForPage.forEach(dir => {
+                    const row = document.createElement('tr');
+
+                    // Create clickable directory name
+                    const nameCell = document.createElement('td');
+                    nameCell.className = 'filename-cell';
+                    const nameLink = document.createElement('a');
+                    nameLink.href = '#';
+                    nameLink.textContent = dir.name;
+                    nameLink.title = dir.name; // Show full name on hover
+                    // Add click handler for navigation
+                    nameLink.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const newPath = currentPath === '/'
+                            ? `/${dir.name}`
+                            : `${currentPath}/${dir.name}`;
+                        loadPath(currentSnapshot, newPath);
+                    });
+                    // Add click handler to show full filename in popup
+                    nameCell.addEventListener('click', (e) => {
+                        if (e.target === nameCell || e.target === nameLink) {
+                            showFullFilenamePopup(dir.name);
+                        }
+                    });
+                    nameCell.appendChild(nameLink);
+
+                    row.appendChild(nameCell);
+                    row.appendChild(createTextCell(formatBytes(dir.S) || '0 Bytes')); // Total Size
+                    row.appendChild(createTextCell(dir.C || 0)); // Total Files
+                    row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
+
+                    // Create Groups cell with links to add to default groups
+                    const groupsCell = document.createElement('td');
+                    const fullDirPath = currentPath === '/' ? `/${dir.name}` : `${currentPath}/${dir.name}`;
+                    const groupLinks = [];
+
+                    defaultGroups.forEach(group => {
+                        const link = document.createElement('a');
+                        link.href = '#';
+                        link.textContent = group;
+                        link.style.marginRight = '5px';
+                        link.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            addItemToGroup(fullDirPath, 'd', group);
+                        });
+                        groupLinks.push(link);
+                    });
+
+                    if (groupLinks.length > 0) {
+                        groupsCell.appendChild(document.createTextNode('Add to: '));
+                        groupLinks.forEach((link, index) => {
+                            groupsCell.appendChild(link);
+                            if (index < groupLinks.length - 1) {
+                                groupsCell.appendChild(document.createTextNode(', '));
+                            }
+                        });
+                    } else {
+                        groupsCell.textContent = 'No groups available';
+                    }
+
+                    row.appendChild(groupsCell);
+
+                    dirsTbody.appendChild(row);
+                });
+            }
+
+            // Render pagination
+            renderDirectoryPagination(filteredDirs.length);
+        }
+
+        function renderFileTable() {
+            const filterText = document.getElementById('files-filter').value.toLowerCase();
+
+            // Filter files based on the input
+            const filteredFiles = originalFiles.filter(file =>
+                file.name.toLowerCase().includes(filterText)
+            );
+
+            // Calculate pagination
+            const startIndex = (currentFilesPage - 1) * filesPerPage;
+            const endIndex = Math.min(startIndex + filesPerPage, filteredFiles.length);
+            const filesForPage = filteredFiles.slice(startIndex, endIndex);
+
+            // Render files table
+            const filesTbody = document.getElementById('files-tbody');
+            filesTbody.innerHTML = '';
+
+            if (filesForPage.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.setAttribute('colspan', '6');
+                cell.textContent = 'No files match the filter.';
+                cell.className = 'text-center';
+                row.appendChild(cell);
+                filesTbody.appendChild(row);
+            } else {
+                filesForPage.forEach(file => {
+                    const row = document.createElement('tr');
+
+                    // Create file name cell
+                    const nameCell = document.createElement('td');
+                    nameCell.className = 'filename-cell';
+                    nameCell.textContent = file.name;
+                    nameCell.title = file.name; // Show full name on hover
+                    // Add click handler to show full filename in popup
+                    nameCell.addEventListener('click', (e) => {
+                        showFullFilenamePopup(file.name);
+                    });
+                    row.appendChild(nameCell);
+
+                    // Size cell
+                    const sizeCell = document.createElement('td');
+                    sizeCell.textContent = file.size_formatted;
+                    row.appendChild(sizeCell);
+
+                    // Timestamp cells
+                    row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(file.modified) || 'N/A'));
+                    row.appendChild(createTextCell(formatTimestamp(file.accessed) || 'N/A'));
+
+                    // Create Groups cell with links to add to default groups
+                    const groupsCell = document.createElement('td');
+                    const fullFilePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                    const groupLinks = [];
+
+                    defaultGroups.forEach(group => {
+                        const link = document.createElement('a');
+                        link.href = '#';
+                        link.textContent = group;
+                        link.style.marginRight = '5px';
+                        link.addEventListener('click', (e) => {
+                            e.preventDefault();
+                            addItemToGroup(fullFilePath, 'f', group);
+                        });
+                        groupLinks.push(link);
+                    });
+
+                    if (groupLinks.length > 0) {
+                        groupsCell.appendChild(document.createTextNode('Add to: '));
+                        groupLinks.forEach((link, index) => {
+                            groupsCell.appendChild(link);
+                            if (index < groupLinks.length - 1) {
+                                groupsCell.appendChild(document.createTextNode(', '));
+                            }
+                        });
+                    } else {
+                        groupsCell.textContent = 'No groups available';
+                    }
+
+                    row.appendChild(groupsCell);
+
+                    filesTbody.appendChild(row);
+                });
+            }
+
+            // Render pagination
+            renderFilePagination(filteredFiles.length);
+        }
+
+        // Pagination functions
+        function renderDirectoryPagination(totalItems) {
+            const paginationContainer = document.getElementById('dirs-pagination');
+            const totalPages = Math.ceil(totalItems / dirsPerPage);
+
+            paginationContainer.innerHTML = '';
+
+            if (totalPages <= 1) return;
+
+            // Previous button
+            const prevLi = document.createElement('li');
+            prevLi.className = `page-item ${currentDirsPage === 1 ? 'disabled' : ''}`;
+            const prevLink = document.createElement('a');
+            prevLink.className = 'page-link';
+            prevLink.href = '#';
+            prevLink.textContent = 'Previous';
+            prevLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentDirsPage > 1) {
+                    currentDirsPage--;
+                    renderDirectoryTable();
+                }
+            });
+            prevLi.appendChild(prevLink);
+            paginationContainer.appendChild(prevLi);
+
+            // Page numbers
+            const startPage = Math.max(1, currentDirsPage - 2);
+            const endPage = Math.min(totalPages, currentDirsPage + 2);
+
+            if (startPage > 1) {
+                const firstPage = createDirectoryPageLink(1);
+                paginationContainer.appendChild(firstPage);
+
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                const pageLink = createDirectoryPageLink(i);
+                paginationContainer.appendChild(pageLink);
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+
+                const lastPage = createDirectoryPageLink(totalPages);
+                paginationContainer.appendChild(lastPage);
+            }
+
+            // Next button
+            const nextLi = document.createElement('li');
+            nextLi.className = `page-item ${currentDirsPage === totalPages ? 'disabled' : ''}`;
+            const nextLink = document.createElement('a');
+            nextLink.className = 'page-link';
+            nextLink.href = '#';
+            nextLink.textContent = 'Next';
+            nextLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentDirsPage < totalPages) {
+                    currentDirsPage++;
+                    renderDirectoryTable();
+                }
+            });
+            nextLi.appendChild(nextLink);
+            paginationContainer.appendChild(nextLi);
+        }
+
+        function renderFilePagination(totalItems) {
+            const paginationContainer = document.getElementById('files-pagination');
+            const totalPages = Math.ceil(totalItems / filesPerPage);
+
+            paginationContainer.innerHTML = '';
+
+            if (totalPages <= 1) return;
+
+            // Previous button
+            const prevLi = document.createElement('li');
+            prevLi.className = `page-item ${currentFilesPage === 1 ? 'disabled' : ''}`;
+            const prevLink = document.createElement('a');
+            prevLink.className = 'page-link';
+            prevLink.href = '#';
+            prevLink.textContent = 'Previous';
+            prevLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentFilesPage > 1) {
+                    currentFilesPage--;
+                    renderFileTable();
+                }
+            });
+            prevLi.appendChild(prevLink);
+            paginationContainer.appendChild(prevLi);
+
+            // Page numbers
+            const startPage = Math.max(1, currentFilesPage - 2);
+            const endPage = Math.min(totalPages, currentFilesPage + 2);
+
+            if (startPage > 1) {
+                const firstPage = createFilePageLink(1);
+                paginationContainer.appendChild(firstPage);
+
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                const pageLink = createFilePageLink(i);
+                paginationContainer.appendChild(pageLink);
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('li');
+                    ellipsis.className = 'page-item disabled';
+                    ellipsis.innerHTML = '<span class="page-link">...</span>';
+                    paginationContainer.appendChild(ellipsis);
+                }
+
+                const lastPage = createFilePageLink(totalPages);
+                paginationContainer.appendChild(lastPage);
+            }
+
+            // Next button
+            const nextLi = document.createElement('li');
+            nextLi.className = `page-item ${currentFilesPage === totalPages ? 'disabled' : ''}`;
+            const nextLink = document.createElement('a');
+            nextLink.className = 'page-link';
+            nextLink.href = '#';
+            nextLink.textContent = 'Next';
+            nextLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (currentFilesPage < totalPages) {
+                    currentFilesPage++;
+                    renderFileTable();
+                }
+            });
+            nextLi.appendChild(nextLink);
+            paginationContainer.appendChild(nextLi);
+        }
+
+        // Helper functions to create page links
+        function createDirectoryPageLink(pageNumber) {
+            const li = document.createElement('li');
+            li.className = `page-item ${pageNumber === currentDirsPage ? 'active' : ''}`;
+
+            const link = document.createElement('a');
+            link.className = 'page-link';
+            link.href = '#';
+            link.textContent = pageNumber;
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                currentDirsPage = pageNumber;
+                renderDirectoryTable();
+            });
+
+            li.appendChild(link);
+            return li;
+        }
+
+        function createFilePageLink(pageNumber) {
+            const li = document.createElement('li');
+            li.className = `page-item ${pageNumber === currentFilesPage ? 'active' : ''}`;
+
+            const link = document.createElement('a');
+            link.className = 'page-link';
+            link.href = '#';
+            link.textContent = pageNumber;
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                currentFilesPage = pageNumber;
+                renderFileTable();
+            });
+
+            li.appendChild(link);
+            return li;
         }
     </script>
 </body>
