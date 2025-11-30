@@ -2,6 +2,7 @@
 
 from flask import Blueprint, request, jsonify
 import os
+import shutil
 import zipfile
 import json
 import time
@@ -235,10 +236,42 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level, ma
                     # Use the full path from the snapshot, not just the filename
                     zip_path = file_info['full_path'].lstrip('/')  # Remove leading slash to avoid absolute paths
 
-                    # For dry run simulation, skip actual file processing
-                    # In a real implementation, we would read from the original location
-                    # For now, just simulate the backup process by adding placeholder content
-                    zipf.writestr(zip_path, f"Content of {file_info['full_path']}")  # Placeholder content
+                    # Check if the original file exists before processing
+                    original_path = file_info['full_path']
+                    if not os.path.exists(original_path):
+                        with open(log_path, 'a') as log_file:
+                            log_entry = {
+                                'timestamp': int(time.time()),
+                                'src_path': file_info['full_path'],
+                                'dest_path': zip_filename,
+                                'filesize': file_size,
+                                'action': 'failed',
+                                'result': 'Source file does not exist'
+                            }
+                            log_file.write(json.dumps(log_entry) + '\n')
+                        print(f"Warning: Source file does not exist: {original_path}")
+                        files_processed += 1
+                        continue
+
+                    # Actually read and compress the file content
+                    try:
+                        with open(original_path, 'rb') as src_file:
+                            file_content = src_file.read()
+                            zipf.writestr(zip_path, file_content)
+                    except Exception as e:
+                        with open(log_path, 'a') as log_file:
+                            log_entry = {
+                                'timestamp': int(time.time()),
+                                'src_path': file_info['full_path'],
+                                'dest_path': zip_filename,
+                                'filesize': file_size,
+                                'action': 'failed',
+                                'result': f'Error reading/compressing file: {str(e)}'
+                            }
+                            log_file.write(json.dumps(log_entry) + '\n')
+                        print(f"Error reading/compressing file {original_path}: {str(e)}")
+                        files_processed += 1
+                        continue
 
                     # Log the backup operation
                     with open(log_path, 'a') as log_file:
@@ -247,7 +280,8 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level, ma
                             'src_path': file_info['full_path'],
                             'dest_path': zip_filename,
                             'filesize': file_size,
-                            'action': 'backup'
+                            'action': 'backup',
+                            'result': 'success'
                         }
                         log_file.write(json.dumps(log_entry) + '\n')
 
@@ -297,6 +331,16 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log_path):
             dest_dir = os.path.dirname(dest_full_path)
             os.makedirs(dest_dir, exist_ok=True)
 
+            # Actually copy the file to the destination
+            original_path = file_info['full_path']
+            if os.path.exists(original_path):
+                # Copy the file content
+                shutil.copy2(original_path, dest_full_path)  # copy2 preserves metadata
+                resstr = 'success'
+            else:
+                resstr = 'failed: source file does not exist'
+                print(f"Warning: Source file does not exist: {original_path}")
+
             # Log the backup operation
             with open(log_path, 'a') as log_file:
                 log_entry = {
@@ -304,7 +348,8 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log_path):
                     'src_path': file_info['full_path'],
                     'dest_path': dest_full_path,
                     'filesize': file_info.get('size', 0),
-                    'action': 'backup'
+                    'action': 'backup',
+                    'result': resstr
                 }
                 log_file.write(json.dumps(log_entry) + '\n')
 
@@ -312,9 +357,6 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log_path):
             if backup_tasks[task_id]['status'] == 'stopped':
                 backup_tasks[task_id]['status'] = 'cancelled'
                 return
-
-            # Simulate file copying delay (in a real implementation, this would be actual file I/O)
-            time.sleep(0.01)
 
         # Mark task as complete
         backup_tasks[task_id]['status'] = 'completed'
