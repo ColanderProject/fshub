@@ -448,7 +448,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
     }
 
 
-def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None):
+def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None, dirinFilterSet=None, allIncluded=False):
     """Recursively for a directory and its subdirectories based on filters"""
     print("Filtering on path:", path_obj['p'])
     # Start with files directly in this directory that pass the filter
@@ -470,7 +470,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
         # If filter_in is specified, only include files in those groups
         should_include = True
-        if filter_in:
+        if filter_in and not allIncluded:
             should_include = False
             for group_name in filter_in:
                 if (group_name in groups_dict and
@@ -492,6 +492,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
     # Process all subdirectories of the current path
     for dirname in path_obj.get('d', []):
+        needAllIncludeSubDirs = allIncluded
         subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
         should_filter_out = False
         for group_name in filter_out:
@@ -502,13 +503,15 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
         if should_filter_out:
             continue
         should_include = True
-        if filter_in:
+        if filter_in and not needAllIncludeSubDirs:
             should_include = False
-            for group_name in filter_in:
-                if (group_name in groups_dict and
-                    subdir_path in groups_dict[group_name]['d']):
-                    should_include = True
-                    break
+            if dirinFilterSet is not None and subdir_path in dirinFilterSet:
+                should_include = True
+                for group_name in filter_in:
+                    if (group_name in groups_dict and
+                        subdir_path in groups_dict[group_name]['d']):
+                        needAllIncludeSubDirs = True
+                        break
 
         if not should_include:
             continue
@@ -518,7 +521,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
             # Recursively calculate for the subdirectory
             subdir_total_size, subdir_total_count = filter_on_snapshot(subdir_obj, data, path_index,
-                filter_in, filter_out, groups_dict, files)
+                filter_in, filter_out, groups_dict, files, dirinFilterSet, needAllIncludeSubDirs)
 
             # Add the subdirectory's totals to the current directory's totals
             total_size += subdir_total_size
@@ -544,6 +547,17 @@ def get_filtered_files(snapshot_filename, filter_in, filter_out):
     groups_dict = loaded_snapshots[snapshot_filename]['groups']
     path_obj = snapshot_data[0]  # Start from root
     filtered_files = []
+    dirinFilterSet = set()
+    for gin in filter_in:
+        if gin in groups_dict:
+            for fpath in groups_dict[gin]['d']:
+                while True:
+                    dirinFilterSet.add(fpath)
+                    ii = fpath.rfind(os.path.sep)
+                    if ii == -1:
+                        break
+                    fpath = fpath[:ii]
+    print(dirinFilterSet)
     filter_on_snapshot(path_obj, snapshot_data, index, filter_in,
-                        filter_out, groups_dict, filtered_files)
+                        filter_out, groups_dict, filtered_files, dirinFilterSet)
     return filtered_files

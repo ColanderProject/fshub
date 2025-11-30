@@ -891,8 +891,8 @@
                 currentFilesPage = 1;
 
                 // Apply initial sorting (default is size descending)
-                sortDirectories(dirsSortColumn);
-                sortFiles(filesSortColumn);
+                sortDirectories(dirsSortColumn, true);
+                sortFiles(filesSortColumn, true);
             } else {
                 console.error('Failed to load path:', data.error);
             }
@@ -2480,16 +2480,18 @@
         }
 
         // Sorting functions
-        function sortDirectories(column) {
-            if (column === dirsSortColumn) {
-                // If clicking the same column, toggle sort direction
-                dirsSortDirection = dirsSortDirection === 'asc' ? 'desc' : 'asc';
-            } else {
-                // If clicking a new column, default to descending, but for size default to descending (large to small)
-                dirsSortColumn = column;
-                dirsSortDirection = (column === 'size') ? 'desc' : 'desc';
+        function sortDirectories(column, set=false) {
+            if (!set) {
+                if (column === dirsSortColumn) {
+                    // If clicking the same column, toggle sort direction
+                    dirsSortDirection = dirsSortDirection === 'asc' ? 'desc' : 'asc';
+                } else {
+                    // If clicking a new column, default to descending, but for size default to descending (large to small)
+                    dirsSortColumn = column;
+                    dirsSortDirection = (column === 'size') ? 'desc' : 'desc';
+                }
             }
-
+            dirsSortColumn = column;
             // Update sort indicator in UI
             updateSortIndicators('#dirs-container', column, dirsSortDirection);
 
@@ -2556,15 +2558,18 @@
             renderDirectoryTable();
         }
 
-        function sortFiles(column) {
-            if (column === filesSortColumn) {
-                // If clicking the same column, toggle sort direction
-                filesSortDirection = filesSortDirection === 'asc' ? 'desc' : 'asc';
-            } else {
-                // If clicking a new column, default to descending, but for size default to descending (large to small)
-                filesSortColumn = column;
-                filesSortDirection = (column === 'size') ? 'desc' : 'desc';
+        function sortFiles(column, set=false) {
+            if (!set) {
+                if (column === filesSortColumn) {
+                    // If clicking the same column, toggle sort direction
+                    filesSortDirection = filesSortDirection === 'asc' ? 'desc' : 'asc';
+                } else {
+                    // If clicking a new column, default to descending, but for size default to descending (large to small)
+                    filesSortColumn = column;
+                    filesSortDirection = (column === 'size') ? 'desc' : 'desc';
+                }
             }
+            filesSortColumn = column;
 
             // Update sort indicator in UI
             updateSortIndicators('#files-container', column, filesSortDirection);
