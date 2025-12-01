@@ -3,6 +3,7 @@
 from flask import Blueprint, request, jsonify
 import os
 from .explorer import loaded_snapshots
+from ..utils import join_snapshot_path
 
 search_bp = Blueprint('search_bp', __name__)
 
@@ -35,6 +36,9 @@ def search_files():
     for snapshot_filename in snapshot_files:
         snapshot_data = loaded_snapshots[snapshot_filename]['data']
         
+        # Get OS from the first snapshot object for path joining
+        snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+        
         # Parse query for advanced options (e.g., 'ends:xxx', 'starts:xxx')
         search_mode = 'contains'  # default
         search_term = query
@@ -64,7 +68,7 @@ def search_files():
                         'type': 'file',
                         'name': filename,
                         'path': current_path,
-                        'full_path': os.path.join(current_path, filename),
+                        'full_path': join_snapshot_path(current_path, filename, snapshot_os=snapshot_os),
                         'size': path_obj['s'][i] if i < len(path_obj['s']) else 0,
                         'snapshot': snapshot_filename
                     }
@@ -87,7 +91,7 @@ def search_files():
                         'type': 'directory',
                         'name': dirname,
                         'path': current_path,
-                        'full_path': os.path.join(current_path, dirname),
+                        'full_path': join_snapshot_path(current_path, dirname, snapshot_os=snapshot_os),
                         'snapshot': snapshot_filename
                     }
                     results.append(result)

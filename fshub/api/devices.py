@@ -37,9 +37,18 @@ def get_system_info():
         'os_name': platform.system(),  # OS name (e.g., Linux, Windows, Darwin)
         'os_version': platform.version(),  # OS version
         'os_release': platform.release(),  # OS release (e.g., kernel version on Linux)
-        'thumbprint': calculate_thumbprint(),
-        'freedesktop_os_release': platform.freedesktop_os_release()
+        'thumbprint': calculate_thumbprint()
     }
+    
+    # freedesktop_os_release is only available on Linux
+    if platform.system() == 'Linux':
+        try:
+            device_info['freedesktop_os_release'] = platform.freedesktop_os_release()
+        except OSError:
+            device_info['freedesktop_os_release'] = {}
+    else:
+        device_info['freedesktop_os_release'] = {}
+    
     return device_info
 
 

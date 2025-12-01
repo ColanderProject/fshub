@@ -7,6 +7,8 @@ import gzip
 import threading
 import time
 import uuid
+import platform
+import string
 from datetime import datetime
 from ..config import Config
 from ..utils import get_system_info
@@ -16,6 +18,54 @@ scan_bp = Blueprint('scan_bp', __name__)
 # Thread-safe dictionary to keep track of running scans
 running_scans = {}
 scan_lock = threading.Lock()
+
+
+def scan_windows_drives(counters, result_callback=None):
+    """Scan all Windows drives when path is '/' on Windows"""
+    all_results = []
+    
+    # Initialize counters
+    counters['scanned_count'] = 0
+    counters['scanned_size'] = 0
+    counters['errors'] = []
+    
+    # Get all drive letters in Windows
+    drives = []
+    for letter in string.ascii_uppercase:
+        drive = f"{letter}:\\"
+        if os.path.exists(drive):
+            drives.append(drive)
+    
+    # Create a root entry that represents "This PC"
+    root_obj = {
+        'p': '/',  # Use '/' to represent "This PC"
+        'f': [],   # No files at root level
+        'd': [f"{letter}:" for letter in string.ascii_uppercase if os.path.exists(f"{letter}:\\")],  # List drive letters
+        't': [],   # No file timestamps
+        'T': [],   # Drive timestamps (we'll add them)
+        's': []    # No file sizes
+    }
+    
+    # Get timestamps for each drive
+    for drive in drives:
+        try:
+            stat = os.stat(drive)
+            root_obj['T'].append([
+                int(stat.st_ctime),
+                int(stat.st_mtime),
+                int(stat.st_atime)
+            ])
+        except OSError:
+            root_obj['T'].append([0, 0, 0])
+    
+    all_results.append(root_obj)
+    
+    # Now scan each drive
+    for drive in drives:
+        drive_results = scan(drive, counters, result_callback)
+        all_results.extend(drive_results)
+    
+    return all_results
 
 
 def scan(path, counters, result_callback=None):
@@ -87,7 +137,11 @@ def start_scan():
     data = request.get_json()
     scan_path = data.get('path', '')
     
-    if not scan_path or not os.path.exists(scan_path):
+    # Handle special case for Windows "This PC"
+    if platform.system() == 'Windows' and scan_path == '/':
+        # On Windows, "/" means scan all drives (This PC)
+        pass  # We'll handle this in the scan thread
+    elif not scan_path or not os.path.exists(scan_path):
         return jsonify({'error': 'Invalid path'}), 400
     
     # Check if a scan is already running for this path or subdirectories/parents
@@ -103,7 +157,13 @@ def start_scan():
         # Create a thread to run the scan
         def run_scan():
             start_time = datetime.now()
-            scan_result = scan(scan_path, counters, lambda c: time.sleep(0.01))  # Update callback
+            
+            # Check if we need to scan all Windows drives
+            if platform.system() == 'Windows' and scan_path == '/':
+                scan_result = scan_windows_drives(counters, lambda c: time.sleep(0.01))
+            else:
+                scan_result = scan(scan_path, counters, lambda c: time.sleep(0.01))  # Update callback
+            
             finish_time = datetime.now()
             
             # Add extra info to the first element
@@ -117,6 +177,7 @@ def start_scan():
                 scan_result[0]['host_name'] = system_info['host_name']
                 scan_result[0]['ip_addr'] = system_info['ip_addr']
                 scan_result[0]['mac_addr'] = system_info['mac_addr']
+                scan_result[0]['os_name'] = system_info['os_name']  # Add OS name for cross-platform support
                 scan_result[0]['start_scan_time'] = int(start_time.timestamp())  # Unix timestamp for start time
                 scan_result[0]['finish_scan_time'] = int(finish_time.timestamp())  # Unix timestamp for finish time
             

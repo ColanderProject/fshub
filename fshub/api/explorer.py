@@ -6,7 +6,7 @@ import json
 import gzip
 from datetime import datetime
 from ..config import Config
-from ..utils import format_bytes
+from ..utils import format_bytes, join_snapshot_path
 
 explorer_bp = Blueprint('explorer_bp', __name__)
 
@@ -76,11 +76,39 @@ def get_path():
         return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
 
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
+    
+    # Get OS from snapshot for path normalization
+    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
 
     path_obj = None
     if path is not None:
+        # Normalize the path for lookup
+        lookup_path = path
+        
+        # For Windows snapshots, convert web-friendly paths to Windows format
+        if snapshot_os == 'Windows':
+            # Convert /C:/path to C:\path or /C: to C:\
+            if path.startswith('/') and len(path) >= 3 and path[2] == ':':
+                # Remove leading slash and convert remaining slashes
+                lookup_path = path[1:].replace('/', '\\')
+                # Clean up any double backslashes that might result from double slashes
+                while '\\\\' in lookup_path:
+                    lookup_path = lookup_path.replace('\\\\', '\\')
+                # Ensure drive letter has trailing backslash if it's just the drive
+                if len(lookup_path) == 2:
+                    lookup_path += '\\'
+            # Convert C:/path to C:\path
+            elif len(path) >= 2 and path[1] == ':':
+                lookup_path = path.replace('/', '\\')
+                # Clean up any double backslashes
+                while '\\\\' in lookup_path:
+                    lookup_path = lookup_path.replace('\\\\', '\\')
+                # Ensure drive letter has trailing backslash if it's just the drive
+                if len(lookup_path) == 2:
+                    lookup_path += '\\'
+        
         # Find the path in the snapshot
-        path_idx = loaded_snapshots[snapshot_filename]['index'].get(path)
+        path_idx = loaded_snapshots[snapshot_filename]['index'].get(lookup_path)
         if path_idx is not None:
             path_obj = snapshot_data[path_idx]
     elif index is not None:
@@ -188,9 +216,12 @@ def load_snapshot_file(snapshot_filename):
         # Get the directory path to look up subdirectories
         current_path = path_obj['p']
 
+        # Get OS from the first snapshot object
+        snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+
         # Process all subdirectories of the current path
         for dirname in path_obj.get('d', []):
-            subdir_path = os.path.join(current_path, dirname).replace('\\', '/')
+            subdir_path = join_snapshot_path(current_path, dirname, snapshot_os=snapshot_os)
             if subdir_path in path_index:
                 subdir_idx = path_index[subdir_path]
                 subdir_obj = snapshot_data[subdir_idx]
@@ -295,8 +326,9 @@ def format_path_content(path_obj, snapshot_filename):
         timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
 
         # Get sub counts and total size for this directory (calculated recursively)
-        # Find the corresponding subdirectory object to get its S and C values
-        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+        # Get OS from snapshot data
+        snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
+        subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
 
         subdir_obj = None
         if snapshot_filename and subdir_path in loaded_snapshots[snapshot_filename]['index']:
@@ -319,11 +351,21 @@ def format_path_content(path_obj, snapshot_filename):
 
         dirs.append(dir_info)
 
-    # For Windows, normalize the root path to show drive letters
+    # Normalize the path for web display based on snapshot's OS
     current_path = path_obj['p']
-    if platform.system() == 'Windows':
-        # Convert Windows paths to a more web-friendly format
-        current_path = current_path.replace('\\', '/')
+    snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
+    
+    if snapshot_os == 'Windows':
+        # Convert Windows paths to web-friendly format
+        # C:\ -> /C:
+        # C:\Users -> /C:/Users
+        if len(current_path) >= 2 and current_path[1] == ':':
+            if current_path.endswith(':\\'):
+                # Drive root: C:\ -> /C:
+                current_path = '/' + current_path[0] + ':'
+            else:
+                # Subdirectory: C:\Users -> /C:/Users
+                current_path = '/' + current_path.replace('\\', '/')
 
     return {
         'current_path': current_path,
@@ -338,11 +380,14 @@ def format_path_content(path_obj, snapshot_filename):
 def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc=False):
     """Filter path content based on groups"""
     groups_dict = loaded_snapshots[snapshot_filename]['groups']
+    
+    # Get OS from snapshot data
+    snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
 
     # Filter files
     filtered_files = []
     for i, filename in enumerate(path_obj.get('f', [])):
-        file_path = os.path.join(path_obj['p'], filename)
+        file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
 
         # Check if file should be filtered out
         should_filter_out = False
@@ -381,7 +426,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
     # Filter directories
     filtered_dirs = []
     for i, dirname in enumerate(path_obj.get('d', [])):
-        dir_path = os.path.join(path_obj['p'], dirname)
+        dir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
 
         # Check if directory should be filtered out
         should_filter_out = False
@@ -408,7 +453,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
         timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
 
         # Get sub counts and total size for this directory (calculated recursively)
-        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+        subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
 
         dir_info = {
             'name': dirname,
@@ -441,7 +486,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
         filtered_dirs.append(dir_info)
 
     return {
-        'current_path': path_obj['p'].replace('\\', '/') if os.name == 'nt' else path_obj['p'],
+        'current_path': path_obj['p'],
         'files': filtered_files,
         'dirs': filtered_dirs,
         'filtered': True
@@ -454,9 +499,12 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
     # Start with files directly in this directory that pass the filter
     total_size = 0
     total_count = 0
+    
+    # Get OS from the first snapshot object
+    snapshot_os = data[0].get('os_name') if data else None
 
     for i, filename in enumerate(path_obj.get('f', [])):
-        file_path = os.path.join(path_obj['p'], filename)
+        file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
         # Check if file should be filtered out
         should_filter_out = False
         for group_name in filter_out:
@@ -493,7 +541,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
     # Process all subdirectories of the current path
     for dirname in path_obj.get('d', []):
         needAllIncludeSubDirs = allIncluded
-        subdir_path = os.path.join(path_obj['p'], dirname).replace('\\', '/')
+        subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
         should_filter_out = False
         for group_name in filter_out:
             if (group_name in groups_dict and

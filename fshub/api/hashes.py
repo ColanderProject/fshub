@@ -7,6 +7,8 @@ import threading
 import queue
 from datetime import datetime
 from ..config import Config
+from .explorer import loaded_snapshots
+from ..utils import join_snapshot_path
 
 hash_bp = Blueprint('hash_bp', __name__)
 
@@ -79,6 +81,9 @@ def start_hash_calculation():
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
     groups_dict = loaded_snapshots[snapshot_filename]['groups']
     
+    # Get OS from the first snapshot object for path joining
+    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+    
     # Collect files to hash based on filters
     files_to_process = []
     
@@ -87,7 +92,7 @@ def start_hash_calculation():
         
         # Process files
         for i, filename in enumerate(path_obj.get('f', [])):
-            file_path = os.path.join(current_path, filename)
+            file_path = join_snapshot_path(current_path, filename, snapshot_os=snapshot_os)
             full_path = f"f:{file_path}"
             
             # Check if file should be filtered out
