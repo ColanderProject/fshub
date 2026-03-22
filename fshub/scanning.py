@@ -12,9 +12,26 @@ from .config import Config
 from .utils import get_system_info
 
 
-def scan_windows_drives(counters, result_callback=None):
+def _normalize_prefix(path):
+    """Normalize a path for prefix comparisons."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _normalize_skip_prefixes(skip_prefixes):
+    """Normalize configured skip prefixes."""
+    return [_normalize_prefix(path) for path in skip_prefixes if path]
+
+
+def _should_skip_path(path, normalized_skip_prefixes):
+    """Return True when a path starts with any configured skip prefix."""
+    normalized_path = _normalize_prefix(path)
+    return any(normalized_path.startswith(prefix) for prefix in normalized_skip_prefixes)
+
+
+def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
     """Scan all Windows drives when path is '/' on Windows."""
     all_results = []
+    normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
     # Initialize counters
     counters['scanned_count'] = 0
@@ -54,18 +71,21 @@ def scan_windows_drives(counters, result_callback=None):
     all_results.append(root_obj)
 
     for drive in drives:
+        if _should_skip_path(drive, normalized_skip_prefixes):
+            continue
         counters['current_path'] = drive
         if result_callback:
             result_callback(counters)
-        drive_results = scan(drive, counters, result_callback)
+        drive_results = scan(drive, counters, result_callback, skip_prefixes=skip_prefixes)
         all_results.extend(drive_results)
 
     return all_results
 
 
-def scan(path, counters, result_callback=None):
+def scan(path, counters, result_callback=None, skip_prefixes=None):
     """Scan a directory and return structured data about files and folders."""
     result = []
+    normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
     # Initialize counters
     counters['scanned_count'] = 0
@@ -75,9 +95,19 @@ def scan(path, counters, result_callback=None):
 
     for root, dirs, files in os.walk(path):
         try:
+            if _should_skip_path(root, normalized_skip_prefixes):
+                dirs[:] = []
+                continue
+
             counters['current_path'] = root
             if result_callback:
                 result_callback(counters)
+
+            dirs[:] = [
+                directory
+                for directory in dirs
+                if not _should_skip_path(os.path.join(root, directory), normalized_skip_prefixes)
+            ]
 
             path_obj = {
                 'p': root,
@@ -90,6 +120,8 @@ def scan(path, counters, result_callback=None):
 
             for file in files:
                 file_path = os.path.join(root, file)
+                if _should_skip_path(file_path, normalized_skip_prefixes):
+                    continue
                 try:
                     stat = os.stat(file_path)
                     path_obj['f'].append(file)
@@ -180,15 +212,25 @@ def save_scan_result(scan_result, use_index=False):
     }
 
 
-def run_scan_to_snapshot(scan_path, use_index=False, counters=None, result_callback=None):
+def run_scan_to_snapshot(scan_path, use_index=False, counters=None, result_callback=None, skip_prefixes=None):
     """Run a scan and save its output to a snapshot file."""
     counters = counters if counters is not None else {}
     start_time = datetime.now()
+    counters['skip_prefixes'] = list(skip_prefixes or [])
 
     if platform.system() == 'Windows' and scan_path == '/':
-        scan_result = scan_windows_drives(counters, result_callback)
+        scan_result = scan_windows_drives(
+            counters,
+            result_callback,
+            skip_prefixes=skip_prefixes,
+        )
     else:
-        scan_result = scan(scan_path, counters, result_callback)
+        scan_result = scan(
+            scan_path,
+            counters,
+            result_callback,
+            skip_prefixes=skip_prefixes,
+        )
 
     finish_time = datetime.now()
 

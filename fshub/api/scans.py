@@ -43,6 +43,7 @@ def start_scan():
                 scan_path,
                 use_index=data.get('use_index', False),
                 counters=counters,
+                skip_prefixes=data.get('skip_paths', []),
             )
 
             # Update the scan status

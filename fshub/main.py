@@ -87,10 +87,20 @@ def config_gen():
 @cli.command()
 @click.argument('path')
 @click.option('--use-index', is_flag=True, help='Write indexed snapshot output.')
-def scan(path, use_index):
+@click.option(
+    '--skip-path',
+    'skip_paths',
+    multiple=True,
+    help='Skip any path whose normalized absolute path starts with this prefix. Repeat for multiple prefixes.',
+)
+def scan(path, use_index, skip_paths):
     """Scan a directory and save a snapshot."""
     if not (platform.system() == 'Windows' and path == '/') and not os.path.exists(path):
         raise click.ClickException(f'Invalid path: {path}')
+
+    for skip_path in skip_paths:
+        if not skip_path:
+            raise click.ClickException('Skip paths must not be empty')
 
     if __package__ in (None, ""):
         from fshub.scanning import run_scan_to_snapshot
@@ -105,6 +115,7 @@ def scan(path, use_index):
                 use_index=use_index,
                 counters={},
                 result_callback=reporter.update,
+                skip_prefixes=skip_paths,
             )
         except OSError as e:
             raise click.ClickException(f'Scan failed: {e}') from e
@@ -118,6 +129,8 @@ def scan(path, use_index):
         f"{format_bytes(result['counters'].get('scanned_size', 0))}, "
         f"errors={len(result['counters'].get('errors', []))}"
     )
+    if skip_paths:
+        click.echo(f"Skipped prefixes: {', '.join(skip_paths)}")
 
 
 if __name__ == '__main__':
