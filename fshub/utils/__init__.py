@@ -1,9 +1,43 @@
 """Utility functions for fshub"""
 
+from pathlib import Path
 import platform
 import socket
 import uuid
-import os
+
+
+def _get_linux_os_release():
+    """Return freedesktop os-release data across Python versions."""
+    if platform.system() != 'Linux':
+        return {}
+
+    freedesktop_os_release = getattr(platform, 'freedesktop_os_release', None)
+    if freedesktop_os_release is not None:
+        try:
+            return freedesktop_os_release()
+        except OSError:
+            return {}
+
+    for candidate in (Path('/etc/os-release'), Path('/usr/lib/os-release')):
+        if not candidate.exists():
+            continue
+
+        os_release = {}
+        try:
+            with open(candidate, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    key, value = line.split('=', 1)
+                    os_release[key] = value.strip().strip('"').strip("'")
+        except OSError:
+            return {}
+
+        if os_release:
+            return os_release
+
+    return {}
 
 def get_system_info():
     """Get system information for the current device"""
@@ -26,6 +60,7 @@ def get_system_info():
         'os_name': platform.system(),  # OS name (e.g., Linux, Windows, Darwin)
         'os_version': platform.version(),  # OS version
         'os_release': platform.release(),  # OS release (e.g., kernel version on Linux)
+        'freedesktop_os_release': _get_linux_os_release(),
         'thumbprint': calculate_thumbprint()
     }
     return device_info
