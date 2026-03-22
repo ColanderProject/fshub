@@ -495,7 +495,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
 
 def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None, dirinFilterSet=None, allIncluded=False):
     """Recursively for a directory and its subdirectories based on filters"""
-    print("Filtering on path:", path_obj['p'])
+    # print("Filtering on path:", path_obj['p'])
     # Start with files directly in this directory that pass the filter
     total_size = 0
     total_count = 0
@@ -605,7 +605,7 @@ def get_filtered_files(snapshot_filename, filter_in, filter_out):
                     if ii == -1:
                         break
                     fpath = fpath[:ii]
-    print(dirinFilterSet)
+    # print(dirinFilterSet)
     filter_on_snapshot(path_obj, snapshot_data, index, filter_in,
                         filter_out, groups_dict, filtered_files, dirinFilterSet)
     return filtered_files
