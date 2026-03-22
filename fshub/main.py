@@ -1,8 +1,18 @@
 """Main entry point for fshub command-line interface"""
 
+from pathlib import Path
+import sys
+
 import click
-from .web import start_web_server
-from .config import generate_config
+
+if __package__ in (None, ""):
+    # Allow `python3 fshub/main.py` from the repository root.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from fshub.web import start_web_server
+    from fshub.config import generate_config
+else:
+    from .web import start_web_server
+    from .config import generate_config
 
 
 @click.group()
