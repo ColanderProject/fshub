@@ -1,7 +1,9 @@
 """Utility functions for fshub"""
 
+import os
 from pathlib import Path
 import platform
+import shutil
 import socket
 import uuid
 
@@ -39,10 +41,39 @@ def _get_linux_os_release():
 
     return {}
 
+
+def _get_memory_size():
+    """Return total memory size, without requiring psutil."""
+    try:
+        import psutil
+    except ModuleNotFoundError:
+        psutil = None
+
+    if psutil is not None:
+        return psutil.virtual_memory().total
+
+    if hasattr(os, 'sysconf'):
+        try:
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            phys_pages = os.sysconf('SC_PHYS_PAGES')
+            if isinstance(page_size, int) and isinstance(phys_pages, int):
+                return page_size * phys_pages
+        except (OSError, ValueError):
+            pass
+
+    return None
+
+
+def _get_storage_space():
+    """Return total storage size for the default root path."""
+    root_path = 'C:\\' if platform.system() == 'Windows' else '/'
+    try:
+        return shutil.disk_usage(root_path).total
+    except OSError:
+        return None
+
 def get_system_info():
     """Get system information for the current device"""
-    import psutil
-
     # Get MAC address
     mac = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
                    for elements in range(0,2*6,2)][::-1])
@@ -53,8 +84,8 @@ def get_system_info():
         'device_model': platform.machine(),
         'host_name': platform.node(),
         'cpu_model': platform.processor(),
-        'memory_size': psutil.virtual_memory().total,
-        'storage_space': psutil.disk_usage('/').total if platform.system() != 'Windows' else psutil.disk_usage('C:\\').total,
+        'memory_size': _get_memory_size(),
+        'storage_space': _get_storage_space(),
         'ip_addr': socket.gethostbyname(socket.gethostname()),
         'mac_addr': mac,
         'os_name': platform.system(),  # OS name (e.g., Linux, Windows, Darwin)
