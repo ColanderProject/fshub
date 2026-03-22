@@ -8,10 +8,8 @@ import click
 if __package__ in (None, ""):
     # Allow `python3 fshub/main.py` from the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from fshub.web import start_web_server
     from fshub.config import generate_config
 else:
-    from .web import start_web_server
     from .config import generate_config
 
 
@@ -26,6 +24,10 @@ def cli():
 @click.option('--port', default=None, help='Port to bind to')
 def web(host, port):
     """Start the web UI server"""
+    if __package__ in (None, ""):
+        from fshub.web import start_web_server
+    else:
+        from .web import start_web_server
     start_web_server(host, port)
 
 
