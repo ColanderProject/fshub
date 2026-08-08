@@ -379,3 +379,116 @@ def test_device_rejects_bad_host_name_and_media(client):
     assert client.post('/api/v1/devices', json={'host_name': ''}).status_code == 400
     assert client.post('/api/v1/devices',
                        json={'host_name': 'ok', 'media': 'nope'}).status_code == 400
+
+
+# --- third review round --------------------------------------------------
+
+
+def _this_pc_snapshot():
+    """A 'This PC' snapshot: / -> C:\\ -> C:\\Users -> C:\\Users\\me."""
+    return [
+        {'p': '/', 'f': [], 's': [], 't': [], 'd': ['C:'], 'T': [[0, 0, 0]],
+         'os_name': 'Windows'},
+        {'p': 'C:\\', 'f': [], 's': [], 't': [], 'd': ['Users'], 'T': [[0, 0, 0]]},
+        {'p': 'C:\\Users', 'f': [], 's': [], 't': [], 'd': ['me'], 'T': [[0, 0, 0]]},
+        {'p': 'C:\\Users\\me', 'f': ['doc.txt', 'skip.txt'], 's': [11, 22],
+         't': [[0, 0, 0], [0, 0, 0]], 'd': [], 'T': []},
+    ]
+
+
+def test_filter_in_reaches_below_a_windows_drive(client, config):
+    """snapshot_dirname returned 'C:' where the index holds 'C:\\'.
+
+    The ancestor chain therefore never contained the drive root, so a
+    filter_in selection was pruned at the 'This PC' root and backups of a
+    Windows snapshot silently produced nothing.
+    """
+    name = 'snapshot_9_4.jsonl.gz'
+    write_snapshot(config, name, _this_pc_snapshot())
+    client.post('/api/v1/load_snapshot', json={'filename': name})
+
+    client.post(f'/api/v1/group/{name}/add_file',
+                json={'path': 'C:\\Users\\me\\doc.txt', 'group_name': 'pick'})
+
+    files = get_filtered_files(name, ['pick'], [])
+    assert [f['full_path'] for f in files] == ['C:\\Users\\me\\doc.txt']
+
+
+def test_filter_in_on_a_windows_directory_selects_the_subtree(client, config):
+    name = 'snapshot_9_4.jsonl.gz'
+    write_snapshot(config, name, _this_pc_snapshot())
+    client.post('/api/v1/load_snapshot', json={'filename': name})
+
+    client.post(f'/api/v1/group/{name}/add_dir',
+                json={'path': 'C:\\Users\\me', 'group_name': 'pick'})
+
+    files = get_filtered_files(name, ['pick'], [])
+    assert sorted(f['name'] for f in files) == ['doc.txt', 'skip.txt']
+
+
+def test_backups_started_in_the_same_second_do_not_collide(client, config, scanned_snapshot,
+                                                           sample_tree, tmp_path,
+                                                           monkeypatch):
+    """A wall-clock second is not a unique run id.
+
+    Two runs with identical names and file count used to share a log path
+    (opened with 'w', so one truncated the other) and identical archive
+    names (so the second failed outright in mode 'x').
+    """
+    import zipfile
+
+    import fshub.api.backup as backup_module
+
+    monkeypatch.setattr(backup_module.time, 'time', lambda: 1000.0)
+
+    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    select_all_files(client, scanned_snapshot, sample_tree)
+
+    target = tmp_path / 'zips'
+    for _ in range(2):
+        response = client.post('/api/v1/backup/zip', json={
+            'snapshot_filename': scanned_snapshot,
+            'target_path': str(target),
+            'filter_in': ['all'],
+        })
+        assert response.status_code == 200
+        status = wait_for_task(client, response.get_json()['task_id'])
+        assert status['status'] == 'completed', status.get('error')
+
+    # Two independent logs, neither truncated.
+    assert len(os.listdir(config.backup_log_dir)) == 2
+
+    # Two independent archive sets, six members in total.
+    members = []
+    for archive in target.glob('*.zip'):
+        with zipfile.ZipFile(archive) as zf:
+            members.extend(zf.namelist())
+    assert len(members) == 6
+
+
+def test_folder_backups_in_the_same_second_keep_separate_logs(client, config, scanned_snapshot,
+                                                              sample_tree, tmp_path,
+                                                              monkeypatch):
+    import fshub.api.backup as backup_module
+
+    monkeypatch.setattr(backup_module.time, 'time', lambda: 1000.0)
+
+    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    select_all_files(client, scanned_snapshot, sample_tree)
+
+    for i in range(2):
+        response = client.post('/api/v1/backup/folder', json={
+            'snapshot_filename': scanned_snapshot,
+            'target_path': str(tmp_path / f'out{i}'),
+            'filter_in': ['all'],
+        })
+        assert response.status_code == 200
+        status = wait_for_task(client, response.get_json()['task_id'])
+        assert status['status'] == 'completed', status.get('error')
+
+    logs = os.listdir(config.backup_log_dir)
+    assert len(logs) == 2
+    for log in logs:
+        with open(os.path.join(config.backup_log_dir, log), encoding='utf-8') as f:
+            lines = [line for line in f if line.strip()]
+        assert len(lines) == 1 + 3  # metadata + one entry per file

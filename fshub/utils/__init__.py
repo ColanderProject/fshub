@@ -241,15 +241,38 @@ def snapshot_separator(snapshot_os):
 
 
 def snapshot_dirname(path, snapshot_os=None):
-    """Return the parent directory of a snapshot path, or None at the root."""
+    """Return the parent directory of a snapshot path, or None at the root.
+
+    The result is always a key that can appear in a snapshot index, which
+    means separators are preserved at a root: the parent of ``C:\\Users`` is
+    ``C:\\`` (not ``C:``) and the parent of ``/home`` is ``/``.
+    """
     if snapshot_os is None:
         snapshot_os = detect_snapshot_os(path)
 
     separator = snapshot_separator(snapshot_os)
-    idx = path.rstrip(separator).rfind(separator)
-    if idx <= 0:
+
+    if snapshot_os == 'Windows':
+        # A bare drive root has no parent inside the snapshot itself.
+        if len(path.rstrip(separator)) <= 2 and path[1:2] == ':':
+            return None
+    elif path == separator:
         return None
-    return path[:idx]
+
+    stripped = path.rstrip(separator)
+    idx = stripped.rfind(separator)
+    if idx < 0:
+        return None
+    if idx == 0:
+        # Direct child of the POSIX root.
+        return separator
+
+    parent = stripped[:idx]
+    # Keep the trailing separator on a Windows drive root so the result
+    # matches the indexed path: "C:\\Users" -> "C:\\", never "C:".
+    if snapshot_os == 'Windows' and len(parent) == 2 and parent[1] == ':':
+        return parent + separator
+    return parent
 
 
 def snapshot_relative_path(full_path, snapshot_os=None):

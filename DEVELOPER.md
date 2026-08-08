@@ -92,7 +92,11 @@ A snapshot taken on Windows can be browsed from a Linux server, so **never use
 `os.path` on snapshot paths**. Use the helpers in `fshub.utils`:
 
 - `join_snapshot_path(base, *parts, snapshot_os=...)`
-- `snapshot_dirname(path, snapshot_os=...)`
+- `snapshot_dirname(path, snapshot_os=...)` — always returns a path that
+  can appear in the snapshot index, so a root keeps its separator: the
+  parent of `C:\Users` is `C:\`, not `C:`, and the parent of `/home` is
+  `/`. Returning `C:` broke every `filter_in` selection under a Windows
+  drive, because the ancestor chain never matched the indexed drive root.
 - `snapshot_relative_path(path, snapshot_os)` — for backup destinations.
   Note it only treats `\` as a separator for Windows snapshots: POSIX allows
   backslashes and colons inside file names, and normalising them would make

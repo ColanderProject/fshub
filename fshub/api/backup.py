@@ -31,7 +31,8 @@ class BackupLog:
 
     def __init__(self, path, meta):
         self.path = path
-        self._file = open(path, 'w', encoding='utf-8')
+        # 'x': a run must never truncate another run's log.
+        self._file = open(path, 'x', encoding='utf-8')
         self.write(meta)
 
     def write(self, entry):
@@ -103,8 +104,10 @@ def _create_task(total_files):
 def _open_log(backup_target_name, backup_name, file_count, meta):
     """Create the backup log inside the configured data directory.
 
-    Returns (log, run_id); run_id also names the archives of a zip run so
-    successive backups into one directory do not overwrite each other.
+    Returns (log, run_id). The run id also names the archives of a zip run,
+    so it has to be unique: a wall-clock second is not, since two runs with
+    the same names and file count can start within one second and would then
+    share both the log path and the archive names.
     """
     log_dir = get_config().backup_log_dir
     os.makedirs(log_dir, exist_ok=True)
@@ -112,8 +115,8 @@ def _open_log(backup_target_name, backup_name, file_count, meta):
     timestamp = int(time.time())
     target = sanitize_name(backup_target_name, what='backup_target_name')
     name = sanitize_name(backup_name, what='backup_name')
-    run_id = f'{name}_{timestamp}'
-    log_path = os.path.join(log_dir, f'{target}_{name}_{file_count}_{timestamp}.jl')
+    run_id = f'{name}_{timestamp}_{uuid.uuid4().hex[:8]}'
+    log_path = os.path.join(log_dir, f'{target}_{run_id}_{file_count}.jl')
 
     meta = dict(meta, timestamp=timestamp, run_id=run_id)
     return BackupLog(log_path, meta), run_id

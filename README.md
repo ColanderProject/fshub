@@ -81,10 +81,10 @@ Everything lives under `data_path`:
 └── backups/     # one JSONL log per backup run
 ```
 
-Zip backups write `<backup_name>_<timestamp>_NNN.zip` into the target
+Zip backups write `<backup_name>_<timestamp>_<uuid>_NNN.zip` into the target
 directory, and archives are opened with mode `x`, so running a backup twice
 into the same directory adds a new set rather than overwriting the previous
-one.
+one — even for two runs started within the same second.
 
 ## Development
 

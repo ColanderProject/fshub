@@ -51,10 +51,18 @@ def test_snapshot_relative_path_is_relative_and_safe(full_path, snapshot_os, exp
 
 
 @pytest.mark.parametrize('path,snapshot_os,expected', [
+    ('/home/u/a', 'Linux', '/home/u'),
     ('/home/u', 'Linux', '/home'),
-    ('/home', 'Linux', None),
+    # The parent of a top level directory is the root itself, which is what
+    # the snapshot index is keyed on.
+    ('/home', 'Linux', '/'),
+    ('/', 'Linux', None),
     ('C:\\Users\\u', 'Windows', 'C:\\Users'),
+    # ... and on Windows the drive root keeps its separator, or it would not
+    # match the indexed path.
+    ('C:\\Users', 'Windows', 'C:\\'),
     ('C:\\', 'Windows', None),
+    ('C:', 'Windows', None),
 ])
 def test_snapshot_dirname(path, snapshot_os, expected):
     assert snapshot_dirname(path, snapshot_os=snapshot_os) == expected
