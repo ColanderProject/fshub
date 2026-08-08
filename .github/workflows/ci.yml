@@ -1,8 +1,17 @@
 name: CI
 
 on:
+  # Only the trunk needs a push trigger; work on a branch is covered by the
+  # pull_request event, so this does not build every commit twice.
   push:
+    branches: [master]
   pull_request:
+
+# Superseded runs for the same branch are pointless once a newer commit
+# exists.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
