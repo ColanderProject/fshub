@@ -516,28 +516,45 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
 
 def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict,
                        files=None, dirinFilterSet=None, allIncluded=False):
-    """Recursively total a directory tree, honouring the group filters.
+    """Total a directory tree, honouring the group filters.
 
     Returns (total_size, total_count) and, when ``files`` is provided,
     appends every matching file to it.
+
+    Uses an explicit stack rather than recursion: snapshots routinely nest
+    deeper than Python's recursion limit.
     """
     total_size = 0
     total_count = 0
 
     snapshot_os = data[0].get('os_name') if data else None
 
-    for i, filename in enumerate(path_obj.get('f', [])):
-        file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
+    # (path_obj, allIncluded) pairs still to visit.
+    stack = [(path_obj, allIncluded)]
+    visited = set()
 
-        if _in_any_group(groups_dict, filter_out, 'f', file_path):
+    while stack:
+        current, inherited_include = stack.pop()
+
+        current_path = current['p']
+        if current_path in visited:
             continue
+        visited.add(current_path)
 
-        should_include = True
-        if filter_in and not allIncluded:
-            should_include = _in_any_group(groups_dict, filter_in, 'f', file_path)
+        for i, filename in enumerate(current.get('f', [])):
+            file_path = join_snapshot_path(current_path, filename, snapshot_os=snapshot_os)
 
-        if should_include:
-            size = path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0
+            if _in_any_group(groups_dict, filter_out, 'f', file_path):
+                continue
+
+            should_include = True
+            if filter_in and not inherited_include:
+                should_include = _in_any_group(groups_dict, filter_in, 'f', file_path)
+
+            if not should_include:
+                continue
+
+            size = current['s'][i] if i < len(current.get('s', [])) else 0
             total_size += size
             total_count += 1
             if files is not None:
@@ -545,38 +562,34 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
                     'name': filename,
                     'full_path': file_path,
                     'size': size,
-                    'created': path_obj['t'][i][0] if i < len(path_obj.get('t', [])) else None,
+                    'created': current['t'][i][0] if i < len(current.get('t', [])) else None,
                 })
 
-    for dirname in path_obj.get('d', []):
-        needAllIncludeSubDirs = allIncluded
-        subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
+        # Reversed so that popping the stack visits children in listed order.
+        for dirname in reversed(current.get('d', [])):
+            subdir_include = inherited_include
+            subdir_path = join_snapshot_path(current_path, dirname, snapshot_os=snapshot_os)
 
-        if _in_any_group(groups_dict, filter_out, 'd', subdir_path):
-            continue
+            if _in_any_group(groups_dict, filter_out, 'd', subdir_path):
+                continue
 
-        should_include = True
-        if filter_in and not needAllIncludeSubDirs:
-            should_include = False
-            if dirinFilterSet is not None and subdir_path in dirinFilterSet:
-                should_include = True
-                if _in_any_group(groups_dict, filter_in, 'd', subdir_path):
-                    needAllIncludeSubDirs = True
+            should_include = True
+            if filter_in and not subdir_include:
+                should_include = False
+                if dirinFilterSet is not None and subdir_path in dirinFilterSet:
+                    should_include = True
+                    # A directory listed in filter_in selects its whole subtree.
+                    if _in_any_group(groups_dict, filter_in, 'd', subdir_path):
+                        subdir_include = True
 
-        if not should_include:
-            continue
+            if not should_include:
+                continue
 
-        subdir_idx = path_index.get(subdir_path)
-        if subdir_idx is None:
-            continue
+            subdir_idx = path_index.get(subdir_path)
+            if subdir_idx is None:
+                continue
 
-        subdir_total_size, subdir_total_count = filter_on_snapshot(
-            data[subdir_idx], data, path_index, filter_in, filter_out,
-            groups_dict, files, dirinFilterSet, needAllIncludeSubDirs,
-        )
-
-        total_size += subdir_total_size
-        total_count += subdir_total_count
+            stack.append((data[subdir_idx], subdir_include))
 
     return total_size, total_count
 

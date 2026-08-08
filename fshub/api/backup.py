@@ -367,9 +367,13 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log, snapshot_o
             dest_full_path = os.path.join(target_path, *relative_path.split('/'))
 
             try:
-                # Belt and braces: never write outside the requested target.
-                ensure_within(target_path, os.path.dirname(dest_full_path), what='destination')
                 os.makedirs(os.path.dirname(dest_full_path), exist_ok=True)
+                # Validate the *complete* destination after the parents exist:
+                # a pre-existing symlink there would otherwise let copy2 write
+                # straight through it to a file outside the target.
+                ensure_within(target_path, dest_full_path, what='destination')
+                if os.path.islink(dest_full_path):
+                    raise UnsafePathError(f'Destination is a symlink: {dest_full_path}')
                 shutil.copy2(source_path, dest_full_path)
             except (OSError, UnsafePathError) as e:
                 log.record(source_path, dest_full_path, size, 'failed', str(e))

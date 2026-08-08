@@ -3,7 +3,7 @@
 from flask import Blueprint, request, jsonify
 
 from ..utils import join_snapshot_path
-from .explorer import get_snapshot_os, loaded_snapshots, to_web_path
+from .explorer import loaded_snapshots, snapshots_lock, to_web_path
 
 search_bp = Blueprint('search_bp', __name__)
 
@@ -45,21 +45,32 @@ def search_files():
     if not query:
         return jsonify({'error': 'Query is required'}), 400
 
-    # If no specific snapshots provided, search all loaded snapshots
-    if not snapshot_files:
-        snapshot_files = list(loaded_snapshots.keys())
+    # If no specific snapshots provided, search all loaded snapshots.
+    # Grab the entries themselves under the lock: a concurrent
+    # /api/v1/unload_snapshot must not make this request blow up.
+    with snapshots_lock:
+        if not snapshot_files:
+            snapshot_files = list(loaded_snapshots.keys())
 
-    unloaded = [name for name in snapshot_files if name not in loaded_snapshots]
-    if unloaded:
-        return jsonify({'error': f'The following snapshots are not loaded: {", ".join(unloaded)}'}), 400
+        unloaded = [name for name in snapshot_files if name not in loaded_snapshots]
+        if unloaded:
+            return jsonify({
+                'error': f'The following snapshots are not loaded: {", ".join(unloaded)}'
+            }), 400
+
+        targets = [(name, loaded_snapshots[name]) for name in snapshot_files]
 
     mode, term = _parse_query(query)
     results = []
     truncated = False
 
-    for snapshot_filename in snapshot_files:
-        snapshot_data = loaded_snapshots[snapshot_filename]['data']
-        snapshot_os = get_snapshot_os(snapshot_filename)
+    # Collect one extra result so "exactly `limit` matches" is not reported
+    # as truncated.
+    hard_stop = limit + 1
+
+    for snapshot_filename, entry in targets:
+        snapshot_data = entry['data']
+        snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
 
         for path_obj in snapshot_data:
             if truncated:
@@ -83,7 +94,7 @@ def search_files():
                     result['timestamps'] = path_obj['t'][i]
                 results.append(result)
 
-                if len(results) >= limit:
+                if len(results) >= hard_stop:
                     truncated = True
                     break
 
@@ -102,12 +113,14 @@ def search_files():
                     'snapshot': snapshot_filename
                 })
 
-                if len(results) >= limit:
+                if len(results) >= hard_stop:
                     truncated = True
                     break
 
         if truncated:
             break
+
+    del results[limit:]
 
     return jsonify({
         'results': results,

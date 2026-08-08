@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 from flask import Blueprint, request, jsonify
 
@@ -60,10 +61,15 @@ def _device_key(device):
 @device_bp.route('/api/v1/devices', methods=['GET'])
 def get_devices():
     """Get all devices"""
-    # Later records for the same device win, so an update overwrites the old one.
+    # Records for one device may live in several files (host_name can change
+    # while the thumbprint stays put), so file order says nothing about
+    # recency. Deduplicate on the explicit updated_at stamp instead.
     unique = {}
     for device in _load_all_devices():
-        unique[_device_key(device)] = device
+        key = _device_key(device)
+        previous = unique.get(key)
+        if previous is None or device.get('updated_at', 0) >= previous.get('updated_at', 0):
+            unique[key] = device
 
     current_info = get_system_info()
     current_known = _device_key(current_info) in unique
@@ -91,6 +97,9 @@ def add_device():
         return jsonify({'error': str(e)}), 400
 
     media = device.pop('media', None)
+
+    # Stamped on write so deduplication has a reliable ordering key.
+    device['updated_at'] = time.time()
 
     with open(devices_path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(device) + '\n')

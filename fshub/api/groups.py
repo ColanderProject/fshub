@@ -20,6 +20,11 @@ def _read_group_request(snapshot_filename):
     item_path = data.get('path', '')
     group_name = data.get('group_name', '')
 
+    # Truthiness is not enough: a JSON list would reach the group dict as an
+    # unhashable key and turn a client error into a 500.
+    if not isinstance(item_path, str) or not isinstance(group_name, str):
+        return None, None, ({'error': 'Path and group name must be strings'}, 400)
+
     if not item_path or not group_name:
         return None, None, ({'error': 'Path and group name are required'}, 400)
 
@@ -35,18 +40,27 @@ def _mutate_group(snapshot_filename, item_type, action_type):
         payload, status = error
         return jsonify(payload), status
 
+    # The durable log and the in-memory state must move together, otherwise
+    # concurrent add/remove calls can persist in the opposite order and the
+    # group changes meaning after a reload. The log is written first so a
+    # failed write never leaves an unpersisted in-memory change.
     with snapshots_lock:
-        groups = loaded_snapshots[snapshot_filename]['groups']
-        group = groups.setdefault(group_name, {'f': set(), 'd': set()})
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
+
+        try:
+            save_group_action(snapshot_filename, item_path, item_type, group_name, action_type)
+        except UnsafePathError as e:
+            return jsonify({'error': str(e)}), 400
+        except OSError as e:
+            return jsonify({'error': f'Could not persist group change: {e}'}), 500
+
+        group = entry['groups'].setdefault(group_name, {'f': set(), 'd': set()})
         if action_type == 'add':
             group[item_type].add(item_path)
         else:
             group[item_type].discard(item_path)
-
-    try:
-        save_group_action(snapshot_filename, item_path, item_type, group_name, action_type)
-    except UnsafePathError as e:
-        return jsonify({'error': str(e)}), 400
 
     return jsonify({'success': True})
 

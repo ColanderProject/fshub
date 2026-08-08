@@ -263,10 +263,12 @@ def snapshot_relative_path(full_path, snapshot_os=None):
     if snapshot_os is None:
         snapshot_os = detect_snapshot_os(full_path)
 
-    path = full_path.replace('\\', '/')
+    # Backslashes are only separators on Windows; POSIX allows them inside
+    # file names, so touching them there would merge distinct files.
+    path = full_path.replace('\\', '/') if snapshot_os == 'Windows' else full_path
 
     # Strip a Windows drive letter: "C:/Users/x" -> "C/Users/x"
-    if len(path) >= 2 and path[1] == ':':
+    if snapshot_os == 'Windows' and len(path) >= 2 and path[1] == ':':
         path = path[0] + path[2:]
 
     parts = []
@@ -276,6 +278,9 @@ def snapshot_relative_path(full_path, snapshot_os=None):
         if part == '..':
             # Never allow traversal in a generated destination path.
             continue
-        parts.append(part.rstrip(':'))
+        # Other components are kept verbatim: a trailing ':' is a legal
+        # POSIX file name character and stripping it would let two distinct
+        # sources collide on one destination.
+        parts.append(part)
 
-    return '/'.join(p for p in parts if p)
+    return '/'.join(parts)

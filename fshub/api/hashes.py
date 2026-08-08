@@ -134,10 +134,12 @@ def find_duplicates():
         return jsonify({'error': message}), status
 
     # Group by size; only sizes shared by 2+ files can contain duplicates.
+    # Zero-byte files are legitimate duplicates of each other, so only
+    # entries whose size could not be read are skipped.
     by_size = {}
     for path in file_paths:
         size = _safe_size(path)
-        if size is None or size == 0:
+        if size is None:
             continue
         by_size.setdefault(size, []).append(path)
 

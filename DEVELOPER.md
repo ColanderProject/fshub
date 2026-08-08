@@ -83,6 +83,9 @@ depth sort. Do not turn this back into a recursive walk — real trees exceed
 Python's recursion limit, and the Windows "This PC" root (`/` → `C:\`) has no
 string-derivable parent.
 
+The same rule applies to `filter_on_snapshot`, which walks the tree with an
+explicit stack. Anything that traverses a snapshot must stay iterative.
+
 ## Cross-platform paths
 
 A snapshot taken on Windows can be browsed from a Linux server, so **never use
@@ -90,7 +93,10 @@ A snapshot taken on Windows can be browsed from a Linux server, so **never use
 
 - `join_snapshot_path(base, *parts, snapshot_os=...)`
 - `snapshot_dirname(path, snapshot_os=...)`
-- `snapshot_relative_path(path, snapshot_os)` — for backup destinations
+- `snapshot_relative_path(path, snapshot_os)` — for backup destinations.
+  Note it only treats `\` as a separator for Windows snapshots: POSIX allows
+  backslashes and colons inside file names, and normalising them would make
+  two distinct sources collide on one destination.
 - `explorer.to_web_path` / `explorer.from_web_path` — the UI only ever sees
   the normalized form (`C:\Users` ⇄ `/C:/Users`)
 
@@ -99,7 +105,9 @@ A snapshot taken on Windows can be browsed from a Linux server, so **never use
 Group membership is stored as an append-only action log next to the snapshot
 (`<base>_groups.jl`), one JSON array per line:
 `[path, "f"|"d", group_name, "add"|"del", timestamp]`. It is replayed into
-`{group: {'f': set(), 'd': set()}}` on load.
+`{group: {'f': set(), 'd': set()}}` on load. The log write and the in-memory
+update happen together under `snapshots_lock`, log first, so concurrent
+requests cannot persist in a different order than they were applied.
 
 Filtering semantics (`explorer.filter_on_snapshot`):
 

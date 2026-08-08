@@ -21,8 +21,12 @@ def is_related_path(path_a, path_b):
     """True when one path is the other, or contains it.
 
     Compares whole path components so ``/home/a`` and ``/home/ab`` are not
-    considered related.
+    considered related. On Windows ``/`` means "every drive", so it is
+    related to any path.
     """
+    if platform.system() == 'Windows' and '/' in (path_a, path_b):
+        return True
+
     a = _normalize_prefix(path_a).rstrip(os.sep)
     b = _normalize_prefix(path_b).rstrip(os.sep)
     if a == b:
