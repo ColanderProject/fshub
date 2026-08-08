@@ -192,3 +192,45 @@ def test_device_dedup_uses_update_time(client):
     devices = client.get('/api/v1/devices').get_json()['devices']
     assert len(devices) == 1
     assert devices[0]['device_type'] == 'new'
+
+
+def test_write_stamps_increase_under_a_coarse_clock(monkeypatch):
+    """Windows' ~15 ms clock made two quick updates share a timestamp."""
+    import fshub.api.devices as devices
+
+    monkeypatch.setattr(devices.time, 'time', lambda: 1000.0)
+    monkeypatch.setattr(devices, '_last_stamp', 0.0)
+
+    stamps = [devices._next_stamp() for _ in range(5)]
+    assert stamps == sorted(stamps)
+    assert len(set(stamps)) == 5
+
+
+def test_device_dedup_survives_a_coarse_clock(client, monkeypatch):
+    """End to end: a rename must not resurrect the older record."""
+    import fshub.api.devices as devices
+
+    monkeypatch.setattr(devices.time, 'time', lambda: 1000.0)
+
+    info = client.get('/api/v1/devices').get_json()['current_device_info']
+    client.post('/api/v1/devices', json=dict(info, host_name='zzz-old', device_type='old'))
+    client.post('/api/v1/devices', json=dict(info, host_name='aaa-new', device_type='new'))
+
+    devices_list = client.get('/api/v1/devices').get_json()['devices']
+    assert len(devices_list) == 1
+    assert devices_list[0]['device_type'] == 'new'
+
+
+def test_device_dedup_prefers_the_last_line_of_a_file(client, config):
+    """Legacy records without updated_at still resolve by write order."""
+    import json as _json
+
+    info = client.get('/api/v1/devices').get_json()['current_device_info']
+    path = os.path.join(config.devices_dir, 'devices_host.jl')
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(_json.dumps(dict(info, host_name='host', device_type='first')) + '\n')
+        f.write(_json.dumps(dict(info, host_name='host', device_type='second')) + '\n')
+
+    devices_list = client.get('/api/v1/devices').get_json()['devices']
+    assert len(devices_list) == 1
+    assert devices_list[0]['device_type'] == 'second'

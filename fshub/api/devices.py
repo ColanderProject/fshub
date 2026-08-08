@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 
 from flask import Blueprint, request, jsonify
@@ -14,6 +15,26 @@ device_bp = Blueprint('device_bp', __name__)
 DEVICE_PREFIX = 'devices_'
 MEDIA_PREFIX = 'media_'
 DEVICE_SUFFIX = '.jl'
+
+_stamp_lock = threading.Lock()
+_last_stamp = 0.0
+
+
+def _next_stamp():
+    """A strictly increasing write stamp.
+
+    Deduplication needs a total order over device records. The wall clock
+    alone is not enough: on Windows time.time() only ticks every ~15 ms, so
+    two quick updates share a stamp and the tie-break falls back to file
+    name order, which says nothing about recency.
+    """
+    global _last_stamp
+    with _stamp_lock:
+        now = time.time()
+        if now <= _last_stamp:
+            now = _last_stamp + 1e-6
+        _last_stamp = now
+        return now
 
 
 def _device_file(hostname, prefix):
@@ -40,6 +61,12 @@ def _read_jl(path):
 
 
 def _load_all_devices():
+    """Yield (ordering_key, device) for every stored device record.
+
+    The ordering key is (updated_at, file mtime, line number) so that records
+    written before updated_at existed still fall back to something sensible
+    rather than to file name order.
+    """
     devices_dir = get_config().devices_dir
     try:
         entries = os.listdir(devices_dir)
@@ -48,8 +75,15 @@ def _load_all_devices():
 
     all_devices = []
     for name in sorted(entries):
-        if name.startswith(DEVICE_PREFIX) and name.endswith(DEVICE_SUFFIX):
-            all_devices.extend(_read_jl(os.path.join(devices_dir, name)))
+        if not (name.startswith(DEVICE_PREFIX) and name.endswith(DEVICE_SUFFIX)):
+            continue
+        path = os.path.join(devices_dir, name)
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = 0
+        for line_no, device in enumerate(_read_jl(path)):
+            all_devices.append(((device.get('updated_at', 0), mtime, line_no), device))
     return all_devices
 
 
@@ -63,19 +97,18 @@ def get_devices():
     """Get all devices"""
     # Records for one device may live in several files (host_name can change
     # while the thumbprint stays put), so file order says nothing about
-    # recency. Deduplicate on the explicit updated_at stamp instead.
-    unique = {}
-    for device in _load_all_devices():
+    # recency. Keep the record with the highest ordering key instead.
+    best = {}
+    for order, device in _load_all_devices():
         key = _device_key(device)
-        previous = unique.get(key)
-        if previous is None or device.get('updated_at', 0) >= previous.get('updated_at', 0):
-            unique[key] = device
+        if key not in best or order > best[key][0]:
+            best[key] = (order, device)
 
     current_info = get_system_info()
-    current_known = _device_key(current_info) in unique
+    current_known = _device_key(current_info) in best
 
     return jsonify({
-        'devices': list(unique.values()),
+        'devices': [device for _order, device in best.values()],
         'current_device_known': current_known,
         'current_device_info': current_info
     })
@@ -99,7 +132,7 @@ def add_device():
     media = device.pop('media', None)
 
     # Stamped on write so deduplication has a reliable ordering key.
-    device['updated_at'] = time.time()
+    device['updated_at'] = _next_stamp()
 
     with open(devices_path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(device) + '\n')
