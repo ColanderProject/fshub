@@ -44,8 +44,7 @@
         <div class="container-fluid">
             <a class="navbar-brand" href="#">fshub</a>
             <div class="navbar-nav ms-auto">
-                <span id="login-status" class="navbar-text me-3">Not logged in</span>
-                <button id="login-btn" class="btn btn-outline-light btn-sm">Login</button>
+                <span id="device-status" class="navbar-text me-3"></span>
             </div>
         </div>
     </nav>
@@ -510,28 +509,6 @@
         </div>
     </div>
 
-    <!-- Login Modal -->
-    <div class="modal fade" id="loginModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Login</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="mb-3">
-                        <label for="password-input" class="form-label">Password:</label>
-                        <input type="password" class="form-control" id="password-input">
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <button type="button" class="btn btn-primary" id="do-login">Login</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Global variables
@@ -552,15 +529,11 @@
         let backupTaskId = null; // Current backup task ID
         let backupInterval = null; // Interval for checking backup progress
         let backupType = null; // Current backup type (zip or folder)
+        let onboardingShown = false; // Whether we already jumped to the devices tab
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
-            // Check login status
-            checkLoginStatus();
-
             // Setup event listeners
-            document.getElementById('login-btn').addEventListener('click', showLoginModal);
-            document.getElementById('do-login').addEventListener('click', performLogin);
             document.getElementById('refresh-snapshots').addEventListener('click', loadSnapshots);
             document.getElementById('snapshot-select').addEventListener('change', handleSnapshotChange);
             document.getElementById('load-snapshot-btn').addEventListener('click', loadSelectedSnapshot);
@@ -616,63 +589,19 @@
             loadDevices();
         });
         
-        // Check if user is logged in and device status
-        async function checkLoginStatus() {
-            try {
-                const response = await fetch('/api/v1/devices', {
-                    method: 'GET',
-                    credentials: 'same-origin'
-                });
-
-                if (response.ok) {
-                    document.getElementById('login-status').textContent = 'Logged in';
-
-                    const data = await response.json();
-                    // Check if current device is known
-                    if (!data.current_device_known) {
-                        // Device is not in the known devices list
-                        // Navigate to devices tab and show the form
-                        showDeviceTab();
-                    }
-                } else {
-                    document.getElementById('login-status').textContent = 'Not logged in';
-                }
-            } catch (error) {
-                document.getElementById('login-status').textContent = 'Not logged in';
+        // Refresh the "current device" indicator in the navbar
+        async function refreshDeviceStatus(data) {
+            const el = document.getElementById('device-status');
+            if (!el) return;
+            if (!data) {
+                el.textContent = '';
+                return;
             }
+            el.textContent = data.current_device_known
+                ? (data.current_device_info?.device_name || '')
+                : 'Unregistered device';
         }
-        
-        // Show login modal
-        function showLoginModal() {
-            const modal = new bootstrap.Modal(document.getElementById('loginModal'));
-            modal.show();
-        }
-        
-        // Perform login
-        async function performLogin() {
-            const password = document.getElementById('password-input').value;
-            
-            const response = await fetch('/api/v1/login', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ password: password }),
-                credentials: 'same-origin'
-            });
-            
-            const data = await response.json();
-            
-            if (data.success) {
-                document.getElementById('login-status').textContent = 'Logged in';
-                const modal = bootstrap.Modal.getInstance(document.getElementById('loginModal'));
-                modal.hide();
-                document.getElementById('password-input').value = '';
-            } else {
-                alert('Login failed: ' + (data.error || 'Invalid credentials'));
-            }
-        }
-        
+
         // Load available snapshots
         async function loadSnapshots() {
             const response = await fetch('/api/v1/snapshots', {
@@ -1249,7 +1178,7 @@
                 row.appendChild(typeCell);
 
                 const osCell = document.createElement('td');
-                osCell.textContent = `${device.os_name} ${device.os_release}`;
+                osCell.textContent = `${device.os_name || ''} ${device.os_release || ''}`.trim();
                 row.appendChild(osCell);
 
                 const hostCell = document.createElement('td');
@@ -1269,24 +1198,44 @@
 
             // Show current device info
             const currentDeviceDiv = document.getElementById('current-device-info');
-            if (data.current_device_info) {
-                let html = `
-                    <p><strong>Name:</strong> ${data.current_device_info.device_name}</p>
-                    <p><strong>Type:</strong> ${data.current_device_info.device_type}</p>
-                    <p><strong>Model:</strong> ${data.current_device_info.device_model}</p>
-                    <p><strong>OS:</strong> ${data.current_device_info.os_name} ${data.current_device_info.os_release}</p>
-                    <p><strong>Host:</strong> ${data.current_device_info.host_name}</p>
-                    <p><strong>IP:</strong> ${data.current_device_info.ip_addr}</p>
-                    <p><strong>Storage:</strong> ${formatBytes(data.current_device_info.storage_space)}</p>
-                    <p><strong>Known:</strong> ${data.current_device_known ? 'Yes' : 'No'}</p>
-                `;
+            currentDeviceDiv.textContent = '';
+            refreshDeviceStatus(data);
 
-                currentDeviceDiv.innerHTML = html;
+            if (data.current_device_info) {
+                const info = data.current_device_info;
+                const fields = [
+                    ['Name', info.device_name],
+                    ['Type', info.device_type],
+                    ['Model', info.device_model],
+                    ['OS', `${info.os_name || ''} ${info.os_release || ''}`.trim()],
+                    ['Host', info.host_name],
+                    ['IP', info.ip_addr],
+                    ['Storage', formatBytes(info.storage_space)],
+                    ['Known', data.current_device_known ? 'Yes' : 'No'],
+                ];
+
+                // Built with textContent: device records are user-writable data.
+                fields.forEach(([label, value]) => {
+                    const p = document.createElement('p');
+                    const strong = document.createElement('strong');
+                    strong.textContent = `${label}: `;
+                    p.appendChild(strong);
+                    p.appendChild(document.createTextNode(value === undefined || value === null ? '' : String(value)));
+                    currentDeviceDiv.appendChild(p);
+                });
 
                 if (!data.current_device_known) {
-                    currentDeviceDiv.innerHTML += '<p class="text-warning">This device is not in the known devices list. Please add it to the device manager.</p>';
-                    // Show the form to add the current device
-                    showAddDeviceForm(data.current_device_info);
+                    const warning = document.createElement('p');
+                    warning.className = 'text-warning';
+                    warning.textContent = 'This device is not in the known devices list. Please add it to the device manager.';
+                    currentDeviceDiv.appendChild(warning);
+                    showAddDeviceForm(info);
+
+                    // Onboarding: jump to the devices tab once per page load.
+                    if (!onboardingShown) {
+                        onboardingShown = true;
+                        showDeviceTab();
+                    }
                 }
             }
         }

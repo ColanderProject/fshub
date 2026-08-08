@@ -3,9 +3,51 @@
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import uuid
+
+
+class UnsafePathError(ValueError):
+    """Raised when a user supplied name would escape its base directory."""
+
+
+_SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+
+
+def sanitize_name(name, what='name'):
+    """Validate a user supplied file name component.
+
+    Only a conservative character set is allowed so the value can never be
+    used to escape its base directory.
+    """
+    if not name or not isinstance(name, str):
+        raise UnsafePathError(f'Invalid {what}: value is required')
+    if name in ('.', '..') or not _SAFE_NAME_RE.match(name):
+        raise UnsafePathError(f'Invalid {what}: {name!r}')
+    return name
+
+
+def safe_join(base_dir, *names, what='name'):
+    """Join validated name components onto base_dir, refusing to escape it."""
+    for name in names:
+        sanitize_name(name, what=what)
+
+    base_real = os.path.realpath(base_dir)
+    candidate = os.path.realpath(os.path.join(base_real, *names))
+    if candidate != base_real and not candidate.startswith(base_real + os.sep):
+        raise UnsafePathError(f'Invalid {what}: path escapes {base_dir}')
+    return candidate
+
+
+def ensure_within(base_dir, target_path, what='path'):
+    """Return the realpath of target_path, ensuring it stays under base_dir."""
+    base_real = os.path.realpath(base_dir)
+    candidate = os.path.realpath(target_path)
+    if candidate != base_real and not candidate.startswith(base_real + os.sep):
+        raise UnsafePathError(f'Invalid {what}: path escapes {base_dir}')
+    return candidate
 
 
 def _get_linux_os_release():
@@ -184,3 +226,56 @@ def join_snapshot_path(base_path, *paths, snapshot_os=None):
                 result = result.rstrip('/') + '/' + path.lstrip('\\/')
     
     return result
+
+
+def detect_snapshot_os(path):
+    """Best-effort detection of the OS a snapshot path came from."""
+    if len(path) >= 2 and path[1] == ':':
+        return 'Windows'
+    if path.startswith('\\\\'):
+        return 'Windows'
+    return 'Linux'
+
+
+def snapshot_separator(snapshot_os):
+    """Return the path separator used by a snapshot's OS."""
+    return '\\' if snapshot_os == 'Windows' else '/'
+
+
+def snapshot_dirname(path, snapshot_os=None):
+    """Return the parent directory of a snapshot path, or None at the root."""
+    if snapshot_os is None:
+        snapshot_os = detect_snapshot_os(path)
+
+    separator = snapshot_separator(snapshot_os)
+    idx = path.rstrip(separator).rfind(separator)
+    if idx <= 0:
+        return None
+    return path[:idx]
+
+
+def snapshot_relative_path(full_path, snapshot_os=None):
+    """Convert an absolute snapshot path into a safe *relative* POSIX path.
+
+    Used when mirroring files into a backup target so that neither Windows
+    drive letters nor leading separators can escape the target directory.
+    """
+    if snapshot_os is None:
+        snapshot_os = detect_snapshot_os(full_path)
+
+    path = full_path.replace('\\', '/')
+
+    # Strip a Windows drive letter: "C:/Users/x" -> "C/Users/x"
+    if len(path) >= 2 and path[1] == ':':
+        path = path[0] + path[2:]
+
+    parts = []
+    for part in path.split('/'):
+        if not part or part == '.':
+            continue
+        if part == '..':
+            # Never allow traversal in a generated destination path.
+            continue
+        parts.append(part.rstrip(':'))
+
+    return '/'.join(p for p in parts if p)

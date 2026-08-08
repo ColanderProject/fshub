@@ -8,13 +8,34 @@ import platform
 import string
 import time
 
-from .config import Config
+from .config import get_config
 from .utils import get_system_info
 
 
 def _normalize_prefix(path):
     """Normalize a path for prefix comparisons."""
     return os.path.normcase(os.path.abspath(path))
+
+
+def is_related_path(path_a, path_b):
+    """True when one path is the other, or contains it.
+
+    Compares whole path components so ``/home/a`` and ``/home/ab`` are not
+    considered related.
+    """
+    a = _normalize_prefix(path_a).rstrip(os.sep)
+    b = _normalize_prefix(path_b).rstrip(os.sep)
+    if a == b:
+        return True
+    return a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
+def _init_counters(counters, current_path):
+    """Initialise shared counters once per scan run."""
+    counters.setdefault('scanned_count', 0)
+    counters.setdefault('scanned_size', 0)
+    counters.setdefault('errors', [])
+    counters['current_path'] = current_path
 
 
 def _normalize_skip_prefixes(skip_prefixes):
@@ -33,11 +54,7 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
     all_results = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
-    # Initialize counters
-    counters['scanned_count'] = 0
-    counters['scanned_size'] = 0
-    counters['errors'] = []
-    counters['current_path'] = '/'
+    _init_counters(counters, '/')
 
     # Get all drive letters in Windows
     drives = []
@@ -87,11 +104,9 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
     result = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
-    # Initialize counters
-    counters['scanned_count'] = 0
-    counters['scanned_size'] = 0
-    counters['errors'] = []
-    counters['current_path'] = path
+    # Counters accumulate across calls so scanning several Windows drives
+    # reports a single combined total.
+    _init_counters(counters, path)
 
     for root, dirs, files in os.walk(path):
         try:
@@ -164,8 +179,8 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
 def save_scan_result(scan_result, use_index=False):
     """Save scan results to the configured snapshot directory."""
     timestamp = int(time.time())
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
+    config = get_config()
+    snapshot_dir = config.snapshot_dir
     os.makedirs(snapshot_dir, exist_ok=True)
 
     if use_index:
@@ -217,6 +232,7 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None, result_callb
     counters = counters if counters is not None else {}
     start_time = datetime.now()
     counters['skip_prefixes'] = list(skip_prefixes or [])
+    _init_counters(counters, scan_path)
 
     if platform.system() == 'Windows' and scan_path == '/':
         scan_result = scan_windows_drives(

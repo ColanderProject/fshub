@@ -1,157 +1,171 @@
 """Hash management API endpoints for calculating file hashes"""
 
-from flask import Blueprint, request, jsonify
-import os
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import threading
-import queue
-from datetime import datetime
-from ..config import Config
-from .explorer import loaded_snapshots
-from ..utils import join_snapshot_path
+import os
+
+from flask import Blueprint, request, jsonify
+
+from .explorer import get_filtered_files, loaded_snapshots
 
 hash_bp = Blueprint('hash_bp', __name__)
 
-# Thread pool for hash calculation
-hash_queue = queue.Queue()
-hash_workers = []
-hash_active = True
-
-
-def hash_worker():
-    """Worker thread for calculating file hashes"""
-    while hash_active:
-        try:
-            task = hash_queue.get(timeout=1)
-            if task is None:
-                break
-                
-            file_path, result_callback = task
-            file_hash = calculate_file_hash(file_path)
-            
-            # Call the result callback with the result
-            if result_callback:
-                result_callback(file_path, file_hash)
-                
-            hash_queue.task_done()
-        except queue.Empty:
-            continue
-
-
-# Start worker threads
-for i in range(4):  # 4 worker threads
-    t = threading.Thread(target=hash_worker)
-    t.daemon = True
-    t.start()
-    hash_workers.append(t)
+ALLOWED_ALGORITHMS = {'md5', 'sha1', 'sha256', 'sha512', 'blake2b'}
+MAX_WORKERS = 4
+CHUNK_SIZE = 1024 * 1024
 
 
 def calculate_file_hash(file_path, algorithm='sha256'):
-    """Calculate the hash of a file"""
-    hash_func = hashlib.new(algorithm)
+    """Calculate the hash of a file.
+
+    Returns (hash_hex, None) on success or (None, error_message) on failure.
+    """
+    try:
+        hash_func = hashlib.new(algorithm)
+    except ValueError:
+        return None, f'Unsupported algorithm: {algorithm}'
+
     try:
         with open(file_path, 'rb') as f:
-            # Read the file in chunks to handle large files efficiently
-            for chunk in iter(lambda: f.read(8192), b""):
+            for chunk in iter(lambda: f.read(CHUNK_SIZE), b''):
                 hash_func.update(chunk)
-        return hash_func.hexdigest()
-    except Exception as e:
-        return None  # Return None if file can't be read
+    except OSError as e:
+        return None, str(e)
+
+    return hash_func.hexdigest(), None
+
+
+def _hash_files(file_paths, algorithm):
+    """Hash a list of paths using a bounded thread pool."""
+    results = []
+    errors = []
+
+    def work(path):
+        return path, calculate_file_hash(path, algorithm)
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for path, (file_hash, error) in pool.map(work, file_paths):
+            if error:
+                errors.append({'file_path': path, 'error': error})
+            else:
+                results.append({
+                    'file_path': path,
+                    'hash': file_hash,
+                    'algorithm': algorithm,
+                    'size': _safe_size(path),
+                })
+
+    return results, errors
+
+
+def _safe_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def _collect_files(data):
+    """Resolve the request into a list of local file paths to hash."""
+    snapshot_filename = data.get('snapshot_filename', '')
+    if not snapshot_filename:
+        return None, ('Snapshot filename is required', 400)
+
+    if snapshot_filename not in loaded_snapshots:
+        return None, (f'Snapshot not loaded: {snapshot_filename}', 400)
+
+    files = get_filtered_files(
+        snapshot_filename,
+        data.get('filter_in', []),
+        data.get('filter_out', []),
+    )
+    return [f['full_path'] for f in files], None
 
 
 @hash_bp.route('/api/v1/hash/calculate', methods=['POST'])
 def start_hash_calculation():
-    """Start calculating hashes for files based on filters"""
-    data = request.get_json()
-    snapshot_filename = data.get('snapshot_filename', '')
-    filter_in = data.get('filter_in', [])
-    filter_out = data.get('filter_out', [])
+    """Calculate hashes for the files selected by the given group filters.
+
+    Only files that exist on the machine running fshub can be hashed, so this
+    is meant to be called on the device that owns the snapshot.
+    """
+    data = request.get_json(silent=True) or {}
     algorithm = data.get('algorithm', 'sha256')
-    
-    if not snapshot_filename:
-        return jsonify({'error': 'Snapshot filename is required'}), 400
-    
-    # Get filtered files from the snapshot
-    from .search import loaded_snapshots, load_snapshot
-    
-    if snapshot_filename not in loaded_snapshots:
-        if not load_snapshot(snapshot_filename):
-            return jsonify({'error': f'Cannot load snapshot: {snapshot_filename}'}), 400
-    
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
-    
-    # Get OS from the first snapshot object for path joining
-    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
-    
-    # Collect files to hash based on filters
-    files_to_process = []
-    
-    for path_obj in snapshot_data:
-        current_path = path_obj['p']
-        
-        # Process files
-        for i, filename in enumerate(path_obj.get('f', [])):
-            file_path = join_snapshot_path(current_path, filename, snapshot_os=snapshot_os)
-            full_path = f"f:{file_path}"
-            
-            # Check if file should be filtered out
-            should_filter_out = False
-            for group_name in filter_out:
-                if group_name in groups_dict and full_path in groups_dict[group_name]:
-                    should_filter_out = True
-                    break
-            
-            if should_filter_out:
-                continue
-            
-            # If filter_in is specified, only include files in those groups
-            if filter_in:
-                should_include = False
-                for group_name in filter_in:
-                    if group_name in groups_dict and full_path in groups_dict[group_name]:
-                        should_include = True
-                        break
-                if not should_include:
-                    continue
-            
-            # Add file to process list
-            files_to_process.append(file_path)
-    
-    if not files_to_process:
+
+    if algorithm not in ALLOWED_ALGORITHMS:
+        return jsonify({'error': f'Unsupported algorithm: {algorithm}'}), 400
+
+    file_paths, error = _collect_files(data)
+    if error:
+        message, status = error
+        return jsonify({'error': message}), status
+
+    if not file_paths:
         return jsonify({'error': 'No files to process with the given filters'}), 400
-    
-    # Add files to hash queue
-    results = []
-    for file_path in files_to_process:
-        # In a real implementation, we would queue the actual file path to be hashed
-        # For this implementation, I'll calculate the hash directly
-        file_hash = calculate_file_hash(file_path, algorithm)
-        if file_hash:
-            results.append({
-                'file_path': file_path,
-                'hash': file_hash,
-                'algorithm': algorithm
-            })
-    
+
+    results, errors = _hash_files(file_paths, algorithm)
+
     return jsonify({
         'success': True,
+        'algorithm': algorithm,
         'files_processed': len(results),
-        'results': results
+        'files_failed': len(errors),
+        'results': results,
+        'errors': errors,
     })
 
 
-@hash_bp.route('/api/v1/hash/duplicates', methods=['GET'])
+@hash_bp.route('/api/v1/hash/duplicates', methods=['POST'])
 def find_duplicates():
-    """Find duplicate files by comparing hashes"""
-    snapshot_filename = request.args.get('snapshot', '')
-    
-    if not snapshot_filename:
-        return jsonify({'error': 'Snapshot filename is required'}), 400
-    
-    # This would involve calculating or retrieving hashes for all files in the snapshot
-    # and then comparing them to identify duplicates
-    # For now, this is a placeholder implementation
+    """Find duplicate files by hashing the filtered file set.
+
+    Files are grouped by size first so that only same-sized candidates are
+    ever read from disk.
+    """
+    data = request.get_json(silent=True) or {}
+    algorithm = data.get('algorithm', 'sha256')
+
+    if algorithm not in ALLOWED_ALGORITHMS:
+        return jsonify({'error': f'Unsupported algorithm: {algorithm}'}), 400
+
+    file_paths, error = _collect_files(data)
+    if error:
+        message, status = error
+        return jsonify({'error': message}), status
+
+    # Group by size; only sizes shared by 2+ files can contain duplicates.
+    by_size = {}
+    for path in file_paths:
+        size = _safe_size(path)
+        if size is None or size == 0:
+            continue
+        by_size.setdefault(size, []).append(path)
+
+    candidates = [p for paths in by_size.values() if len(paths) > 1 for p in paths]
+    if not candidates:
+        return jsonify({'duplicates': [], 'algorithm': algorithm, 'files_compared': 0})
+
+    results, errors = _hash_files(candidates, algorithm)
+
+    by_hash = {}
+    for item in results:
+        by_hash.setdefault(item['hash'], []).append(item)
+
+    duplicates = [
+        {
+            'hash': file_hash,
+            'size': items[0]['size'],
+            'count': len(items),
+            'files': [item['file_path'] for item in items],
+        }
+        for file_hash, items in by_hash.items()
+        if len(items) > 1
+    ]
+    duplicates.sort(key=lambda d: (d['size'] or 0) * d['count'], reverse=True)
+
     return jsonify({
-        'duplicates': []  # In a real implementation, this would contain duplicate file groups
+        'duplicates': duplicates,
+        'algorithm': algorithm,
+        'files_compared': len(candidates),
+        'errors': errors,
     })

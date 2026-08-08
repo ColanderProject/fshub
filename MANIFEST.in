@@ -1,0 +1,4 @@
+include README.md
+include DEVELOPER.md
+include fshub.yaml.example
+recursive-include fshub/templates *.html

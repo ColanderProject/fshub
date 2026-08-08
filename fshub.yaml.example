@@ -1,0 +1,12 @@
+# fshub configuration.
+#
+# fshub performs NO authentication of its own. When it is reachable by
+# anything other than localhost, put it behind a reverse proxy that does
+# (for example nginx with HTTP basic auth).
+
+# Where snapshots, device records and backup logs are stored.
+data_path: ~/.fshub/
+
+# Bind address. Keep this on localhost when running behind a proxy.
+listen_ip: localhost
+listen_port: 7303

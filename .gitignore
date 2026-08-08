@@ -1,3 +1,10 @@
 *.pyc
-fshub.egg-info/
 __pycache__/
+fshub.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+
+# Local configuration (may contain machine specific paths)
+fshub.yaml

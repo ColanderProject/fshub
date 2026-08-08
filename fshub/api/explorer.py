@@ -1,29 +1,114 @@
 """File explorer API endpoints"""
 
-from flask import Blueprint, request, jsonify
-import os
-import json
 import gzip
+import json
+import os
+import threading
 from datetime import datetime
-from ..config import Config
-from ..utils import format_bytes, join_snapshot_path
+
+from flask import Blueprint, request, jsonify
+
+from ..config import get_config
+from ..utils import (
+    UnsafePathError,
+    format_bytes,
+    join_snapshot_path,
+    safe_join,
+    snapshot_dirname,
+)
 
 explorer_bp = Blueprint('explorer_bp', __name__)
 
-# Global variable for loaded snapshots (shared with search module)
-loaded_snapshots = {}  # Key: filename, Value: {'data': list, 'index': dict, 'groups': dict}
+# Loaded snapshots, shared with the search/group/backup/hash modules.
+# Key: filename, Value: {'data': list, 'index': dict, 'groups': dict}
+loaded_snapshots = {}
+
+# Guards mutation of loaded_snapshots (Flask serves requests from many threads).
+snapshots_lock = threading.RLock()
+
+SNAPSHOT_PREFIX = 'snapshot_'
+SNAPSHOT_SUFFIX = '.jsonl.gz'
+# Snapshots written with `fshub scan --use-index` are split in two files:
+# <base>_index.jsonl.gz holds the paths, <base>.bin.gz the rest of each record.
+INDEX_SUFFIX = '_index.jsonl.gz'
+
+
+def snapshot_path(snapshot_filename):
+    """Resolve a snapshot filename to a path inside the snapshot directory."""
+    if not snapshot_filename.endswith(SNAPSHOT_SUFFIX):
+        raise UnsafePathError(f'Invalid snapshot name: {snapshot_filename!r}')
+    return safe_join(get_config().snapshot_dir, snapshot_filename, what='snapshot name')
+
+
+def groups_path(snapshot_filename):
+    """Resolve the group-actions file that belongs to a snapshot."""
+    if not snapshot_filename.endswith(SNAPSHOT_SUFFIX):
+        raise UnsafePathError(f'Invalid snapshot name: {snapshot_filename!r}')
+    base_name = snapshot_filename[: -len(SNAPSHOT_SUFFIX)]
+    return safe_join(
+        get_config().snapshot_dir,
+        f'{base_name}_groups.jl',
+        what='snapshot name',
+    )
+
+
+def get_snapshot_os(snapshot_filename):
+    """Return the OS a snapshot was captured on, if known."""
+    entry = loaded_snapshots.get(snapshot_filename)
+    if not entry or not entry['data']:
+        return None
+    return entry['data'][0].get('os_name')
+
+
+def to_web_path(path, snapshot_os):
+    """Normalize a snapshot path for display/navigation in the browser.
+
+    Windows paths become forward-slash paths with a leading slash so the UI
+    only ever deals with one format:  C:\\Users -> /C:/Users
+    """
+    if snapshot_os != 'Windows':
+        return path
+
+    if len(path) >= 2 and path[1] == ':':
+        if path.rstrip('\\/') == path[:2]:
+            return '/' + path[:2]
+        return '/' + path.replace('\\', '/').rstrip('/')
+    return path
+
+
+def from_web_path(path, snapshot_os):
+    """Inverse of to_web_path: turn a UI path back into a snapshot path."""
+    if snapshot_os != 'Windows':
+        return path
+
+    lookup_path = path
+    if lookup_path.startswith('/') and len(lookup_path) >= 3 and lookup_path[2] == ':':
+        lookup_path = lookup_path[1:]
+
+    if len(lookup_path) >= 2 and lookup_path[1] == ':':
+        lookup_path = lookup_path.replace('/', '\\')
+        while '\\\\' in lookup_path:
+            lookup_path = lookup_path.replace('\\\\', '\\')
+        if len(lookup_path) == 2:
+            lookup_path += '\\'
+
+    return lookup_path
 
 
 @explorer_bp.route('/api/v1/load_snapshot', methods=['POST'])
 def load_snapshot():
     """Load a snapshot file into memory"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     snapshot_filename = data.get('filename', '')
-    
+
     if not snapshot_filename:
         return jsonify({'error': 'Snapshot filename is required'}), 400
-    
-    success = load_snapshot_file(snapshot_filename)
+
+    try:
+        success = load_snapshot_file(snapshot_filename)
+    except UnsafePathError as e:
+        return jsonify({'error': str(e)}), 400
+
     if not success:
         return jsonify({'error': f'Failed to load snapshot: {snapshot_filename}'}), 400
 
@@ -37,14 +122,15 @@ def load_snapshot():
 @explorer_bp.route('/api/v1/unload_snapshot', methods=['POST'])
 def unload_snapshot():
     """Unload a snapshot from memory"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     snapshot_filename = data.get('filename', '')
-    
-    if snapshot_filename in loaded_snapshots:
-        del loaded_snapshots[snapshot_filename]
-        return jsonify({'success': True})
-    else:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
+
+    with snapshots_lock:
+        if snapshot_filename in loaded_snapshots:
+            del loaded_snapshots[snapshot_filename]
+            return jsonify({'success': True})
+
+    return jsonify({'error': 'Snapshot not loaded'}), 400
 
 
 @explorer_bp.route('/api/v1/getPath', methods=['GET'])
@@ -64,6 +150,9 @@ def get_path():
     except json.JSONDecodeError:
         return jsonify({'error': 'Invalid filter format'}), 400
 
+    if not isinstance(filter_in, list) or not isinstance(filter_out, list):
+        return jsonify({'error': 'Filters must be lists of group names'}), 400
+
     if not snapshot_filename:
         return jsonify({'error': 'Snapshot filename is required'}), 400
 
@@ -72,42 +161,14 @@ def get_path():
         return jsonify({'error': 'Cannot specify both path and index'}), 400
 
     if snapshot_filename not in loaded_snapshots:
-        # if not load_snapshot_file(snapshot_filename):
         return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
 
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    
-    # Get OS from snapshot for path normalization
-    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+    snapshot_os = get_snapshot_os(snapshot_filename)
 
     path_obj = None
     if path is not None:
-        # Normalize the path for lookup
-        lookup_path = path
-        
-        # For Windows snapshots, convert web-friendly paths to Windows format
-        if snapshot_os == 'Windows':
-            # Convert /C:/path to C:\path or /C: to C:\
-            if path.startswith('/') and len(path) >= 3 and path[2] == ':':
-                # Remove leading slash and convert remaining slashes
-                lookup_path = path[1:].replace('/', '\\')
-                # Clean up any double backslashes that might result from double slashes
-                while '\\\\' in lookup_path:
-                    lookup_path = lookup_path.replace('\\\\', '\\')
-                # Ensure drive letter has trailing backslash if it's just the drive
-                if len(lookup_path) == 2:
-                    lookup_path += '\\'
-            # Convert C:/path to C:\path
-            elif len(path) >= 2 and path[1] == ':':
-                lookup_path = path.replace('/', '\\')
-                # Clean up any double backslashes
-                while '\\\\' in lookup_path:
-                    lookup_path = lookup_path.replace('\\\\', '\\')
-                # Ensure drive letter has trailing backslash if it's just the drive
-                if len(lookup_path) == 2:
-                    lookup_path += '\\'
-        
-        # Find the path in the snapshot
+        lookup_path = from_web_path(path, snapshot_os)
         path_idx = loaded_snapshots[snapshot_filename]['index'].get(lookup_path)
         if path_idx is not None:
             path_obj = snapshot_data[path_idx]
@@ -121,178 +182,210 @@ def get_path():
     # Apply filters if requested
     if use_filter:
         return jsonify(filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc))
-    else:
-        return jsonify(format_path_content(path_obj, snapshot_filename))
+    return jsonify(format_path_content(path_obj, snapshot_filename))
 
 
 @explorer_bp.route('/api/v1/snapshots', methods=['GET'])
 def get_snapshots():
     """Get a list of all available snapshots"""
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
-    
+    snapshot_dir = get_config().snapshot_dir
+
     available_snapshots = []
-    for file in os.listdir(snapshot_dir):
-        if file.startswith('snapshot_') and file.endswith('.jsonl.gz'):
-            # Get file stats
-            filepath = os.path.join(snapshot_dir, file)
+    for file in list_snapshot_files(snapshot_dir):
+        filepath = os.path.join(snapshot_dir, file)
+        try:
             stat = os.stat(filepath)
-            
-            # Extract timestamp from filename
-            parts = file.split('_')
-            if len(parts) >= 3:
-                timestamp = int(parts[1]) if parts[1].isdigit() else 0
-            else:
-                timestamp = 0
-                
-            available_snapshots.append({
-                'filename': file,
-                'size': stat.st_size,
-                'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                'loaded': file in loaded_snapshots,
-                'timestamp': timestamp
-            })
-    
+        except OSError:
+            continue
+
+        # Extract timestamp from filename: snapshot_<ts>_<count>.jsonl.gz
+        parts = file.split('_')
+        timestamp = int(parts[1]) if len(parts) >= 3 and parts[1].isdigit() else 0
+
+        available_snapshots.append({
+            'filename': file,
+            'size': stat.st_size,
+            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            'loaded': file in loaded_snapshots,
+            'timestamp': timestamp
+        })
+
     # Sort by timestamp (newest first)
     available_snapshots.sort(key=lambda x: x['timestamp'], reverse=True)
-    
+
     return jsonify({'snapshots': available_snapshots})
+
+
+def list_snapshot_files(snapshot_dir):
+    """List snapshot files, tolerating a missing data directory."""
+    try:
+        entries = os.listdir(snapshot_dir)
+    except OSError:
+        return []
+    return sorted(
+        f for f in entries
+        if f.startswith(SNAPSHOT_PREFIX) and f.endswith(SNAPSHOT_SUFFIX)
+    )
+
+
+def _load_groups(snapshot_filename):
+    """Replay the group action log into {group: {'f': set, 'd': set}}."""
+    try:
+        path = groups_path(snapshot_filename)
+    except UnsafePathError:
+        return {}
+
+    groups_dict = {}
+    if not os.path.exists(path):
+        return groups_dict
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                item_path, item_type, group_name, action_type, _ts = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+
+            group = groups_dict.setdefault(group_name, {'f': set(), 'd': set()})
+            if item_type not in group:
+                continue
+            if action_type == 'add':
+                group[item_type].add(item_path)
+            elif action_type == 'del':
+                group[item_type].discard(item_path)
+
+    return groups_dict
+
+
+def _compute_recursive_totals(snapshot_data, path_index, snapshot_os):
+    """Fill in S (total size) and C (total file count) for every directory.
+
+    Done bottom-up over an explicit child->parent map so it stays iterative:
+    a recursive walk blows the Python stack on deep trees, and a purely
+    string-based parent lookup cannot express the Windows "This PC" root.
+    """
+    for path_obj in snapshot_data:
+        path_obj['S'] = sum(path_obj.get('s', []))
+        path_obj['C'] = len(path_obj.get('f', []))
+
+    # child index -> parent index, derived from the recorded directory lists
+    parent_of = {}
+    for i, path_obj in enumerate(snapshot_data):
+        for dirname in path_obj.get('d', []):
+            child_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
+            child_idx = path_index.get(child_path)
+            if child_idx is not None and child_idx != i and child_idx not in parent_of:
+                parent_of[child_idx] = i
+
+    # Depth of each node, memoised, so children are always summed first.
+    depth = {}
+
+    def depth_of(idx):
+        stack = []
+        cur = idx
+        while cur is not None and cur not in depth and cur not in stack:
+            stack.append(cur)
+            cur = parent_of.get(cur)
+
+        # -1 so the top-most ancestor in the chain ends up at depth 0.
+        base = depth[cur] if cur is not None and cur in depth else -1
+        for node in reversed(stack):
+            base += 1
+            depth[node] = base
+        return depth[idx]
+
+    order = sorted(range(len(snapshot_data)), key=depth_of, reverse=True)
+
+    for idx in order:
+        parent_idx = parent_of.get(idx)
+        if parent_idx is None:
+            continue
+        snapshot_data[parent_idx]['S'] += snapshot_data[idx]['S']
+        snapshot_data[parent_idx]['C'] += snapshot_data[idx]['C']
+
+
+def _read_snapshot_records(snapshot_filename):
+    """Yield the path records of a snapshot, in either storage format."""
+    path = snapshot_path(snapshot_filename)
+    if not os.path.exists(path):
+        return None
+
+    if not snapshot_filename.endswith(INDEX_SUFFIX):
+        records = []
+        with gzip.open(path, 'rt', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    records.append(json.loads(line))
+        return records
+
+    base_name = snapshot_filename[: -len(INDEX_SUFFIX)]
+    data_path = safe_join(
+        get_config().snapshot_dir, f'{base_name}.bin.gz', what='snapshot name'
+    )
+    if not os.path.exists(data_path):
+        return None
+
+    records = []
+    with gzip.open(path, 'rt', encoding='utf-8') as index_file, \
+            gzip.open(data_path, 'rt', encoding='utf-8') as data_file:
+        for index_line, data_line in zip(index_file, data_file):
+            if not index_line.strip():
+                continue
+            record = json.loads(data_line)
+            record['p'] = json.loads(index_line)['p']
+            records.append(record)
+    return records
 
 
 def load_snapshot_file(snapshot_filename):
     """Load a snapshot file into memory"""
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
-    snapshot_path = os.path.join(snapshot_dir, snapshot_filename)
-    
-    if not os.path.exists(snapshot_path):
+    snapshot_data = _read_snapshot_records(snapshot_filename)
+    if snapshot_data is None:
         return False
-    
-    # Load the snapshot data
-    snapshot_data = []
-    with gzip.open(snapshot_path, 'rt', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                snapshot_data.append(json.loads(line))
-    
+
     # Build an index for faster path lookups
     path_index = {}
     for i, path_obj in enumerate(snapshot_data):
         path_index[path_obj['p']] = i
-    
-    # Load groups if they exist
-    base_name = snapshot_filename.replace('.jsonl.gz', '')
-    groups_filename = f"{base_name}_groups.jl"
-    groups_path = os.path.join(snapshot_dir, groups_filename)
 
-    groups_dict = {}
-    if os.path.exists(groups_path):
-        with open(groups_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    action = json.loads(line)
-                    path, item_type, group_name, action_type, timestamp = action
+    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+    _compute_recursive_totals(snapshot_data, path_index, snapshot_os)
 
-                    if group_name not in groups_dict:
-                        groups_dict[group_name] = {'f': set(), 'd': set()}
-
-                    if action_type == 'add':
-                        groups_dict[group_name][item_type].add(path)
-                    elif action_type == 'del':
-                        groups_dict[group_name][item_type].discard(path)
-
-    # Pre-calculate sub counts and total sizes for all directories
-    # Reset the S and C fields for all directories initially
-    for path_obj in snapshot_data:
-        path_obj['S'] = sum(path_obj.get('s', []))  # Size of files directly in this directory
-        path_obj['C'] = len(path_obj.get('f', []))  # Count of files directly in this directory
-
-    # Recursive helper function to calculate total size and count for a directory
-    def calculate_recursive_totals(path_obj):
-        """Recursively calculate total size and file count for a directory and its subdirectories"""
-        total_size = path_obj['S']  # Start with the size of files directly in this directory
-        total_count = path_obj['C']  # Start with the count of files directly in this directory
-
-        # Get the directory path to look up subdirectories
-        current_path = path_obj['p']
-
-        # Get OS from the first snapshot object
-        snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
-
-        # Process all subdirectories of the current path
-        for dirname in path_obj.get('d', []):
-            subdir_path = join_snapshot_path(current_path, dirname, snapshot_os=snapshot_os)
-            if subdir_path in path_index:
-                subdir_idx = path_index[subdir_path]
-                subdir_obj = snapshot_data[subdir_idx]
-
-                # Recursively calculate for the subdirectory
-                subdir_total_size, subdir_total_count = calculate_recursive_totals(subdir_obj)
-
-                # Add the subdirectory's totals to the current directory's totals
-                total_size += subdir_total_size
-                total_count += subdir_total_count
-
-        # Store the calculated totals in the path object
-        path_obj['S'] = total_size  # Total size including subdirectories
-        path_obj['C'] = total_count  # Total file count including subdirectories
-
-        return total_size, total_count
-
-    # To avoid recalculating for subdirectories multiple times, we should process from leaves up to root
-    # We'll first mark which paths have already been processed
-    # processed = set()
-
-    # def get_path_depth(path):
-    #     """Helper function to determine the depth of a path for ordering"""
-    #     return path.count('/') if path != '/' else 0  # Root path has depth 0
-
-    # # Sort paths by depth in descending order (deepest first) to ensure children are processed before parents
-    # sorted_path_indices = sorted(range(len(snapshot_data)),
-    #                              key=lambda i: get_path_depth(snapshot_data[i]['p']),
-    #                              reverse=True)
-
-    # Process each path object in depth order to calculate recursive totals
-    # for idx in sorted_path_indices:
-    #     path_obj = snapshot_data[idx]
-    #     if path_obj['p'] not in processed:
-    #         calculate_recursive_totals(path_obj)
-    #         processed.add(path_obj['p'])
-    calculate_recursive_totals(snapshot_data[0])  # Start from root
-    loaded_snapshots[snapshot_filename] = {
-        'data': snapshot_data,
-        'index': path_index,
-        'groups': groups_dict
-    }
+    with snapshots_lock:
+        loaded_snapshots[snapshot_filename] = {
+            'data': snapshot_data,
+            'index': path_index,
+            'groups': _load_groups(snapshot_filename),
+        }
 
     return True
-
-
 
 
 def get_snapshot_info(snapshot_filename):
     """Get information about a loaded snapshot"""
     if snapshot_filename not in loaded_snapshots:
         return None
-    
+
     snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    
+
     if not snapshot_data:
         return {
             'path_count': 0,
             'total_files': 0,
             'total_dirs': 0,
-            'total_size': 0
+            'total_size': 0,
+            'total_size_formatted': format_bytes(0),
+            'root_path': '',
         }
-    
-    # Get root information from the first path object (usually the root)
+
     root_obj = snapshot_data[0]
-    
-    # Count total files and directories across all paths
+
     total_files = sum(len(path_obj.get('f', [])) for path_obj in snapshot_data)
     total_dirs = sum(len(path_obj.get('d', [])) for path_obj in snapshot_data)
     total_size = sum(sum(path_obj.get('s', [])) for path_obj in snapshot_data)
-    
+
     return {
         'path_count': len(snapshot_data),
         'total_files': total_files,
@@ -303,231 +396,148 @@ def get_snapshot_info(snapshot_filename):
     }
 
 
+def _file_entry(path_obj, i):
+    size = path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0
+    timestamps = path_obj['t'][i] if i < len(path_obj.get('t', [])) else [None, None, None]
+    return {
+        'name': path_obj['f'][i],
+        'size': size,
+        'size_formatted': format_bytes(size),
+        'created': timestamps[0],
+        'modified': timestamps[1],
+        'accessed': timestamps[2],
+    }
+
+
+def _dir_entry(path_obj, i):
+    timestamps = path_obj['T'][i] if i < len(path_obj.get('T', [])) else [None, None, None]
+    return {
+        'name': path_obj['d'][i],
+        'created': timestamps[0],
+        'modified': timestamps[1],
+        'accessed': timestamps[2],
+    }
+
+
+def _apply_totals(dir_info, size, count):
+    dir_info['S'] = size
+    dir_info['C'] = count
+    dir_info['size_formatted'] = format_bytes(size)
+    dir_info['file_count'] = count
+
+
 def format_path_content(path_obj, snapshot_filename):
     """Format path content for API response"""
-    import platform
+    snapshot_os = get_snapshot_os(snapshot_filename)
+    entry = loaded_snapshots.get(snapshot_filename, {})
+    index = entry.get('index', {})
+    data = entry.get('data', [])
 
-    files = []
-    for i, filename in enumerate(path_obj.get('f', [])):
-        size = path_obj['s'][i] if i < len(path_obj['s']) else 0
-        timestamps = path_obj['t'][i] if i < len(path_obj['t']) else [None, None, None]
-
-        files.append({
-            'name': filename,
-            'size': size,
-            'size_formatted': format_bytes(size),
-            'created': timestamps[0],
-            'modified': timestamps[1],
-            'accessed': timestamps[2]
-        })
+    files = [_file_entry(path_obj, i) for i in range(len(path_obj.get('f', [])))]
 
     dirs = []
     for i, dirname in enumerate(path_obj.get('d', [])):
-        timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
-
-        # Get sub counts and total size for this directory (calculated recursively)
-        # Get OS from snapshot data
-        snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
+        dir_info = _dir_entry(path_obj, i)
         subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
-
-        subdir_obj = None
-        if snapshot_filename and subdir_path in loaded_snapshots[snapshot_filename]['index']:
-            subdir_idx = loaded_snapshots[snapshot_filename]['index'][subdir_path]
-            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
-
-        dir_info = {
-            'name': dirname,
-            'created': timestamps[0],
-            'modified': timestamps[1],
-            'accessed': timestamps[2]
-        }
-
-        # Add recursive size and count if available
-        if subdir_obj:
-            dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
-            dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
-            dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
-            dir_info['file_count'] = subdir_obj.get('C', 0)
-
+        subdir_idx = index.get(subdir_path)
+        if subdir_idx is not None:
+            subdir_obj = data[subdir_idx]
+            _apply_totals(dir_info, subdir_obj.get('S', 0), subdir_obj.get('C', 0))
         dirs.append(dir_info)
 
-    # Normalize the path for web display based on snapshot's OS
-    current_path = path_obj['p']
-    snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
-    
-    if snapshot_os == 'Windows':
-        # Convert Windows paths to web-friendly format
-        # C:\ -> /C:
-        # C:\Users -> /C:/Users
-        if len(current_path) >= 2 and current_path[1] == ':':
-            if current_path.endswith(':\\'):
-                # Drive root: C:\ -> /C:
-                current_path = '/' + current_path[0] + ':'
-            else:
-                # Subdirectory: C:\Users -> /C:/Users
-                current_path = '/' + current_path.replace('\\', '/')
-
     return {
-        'current_path': current_path,
+        'current_path': to_web_path(path_obj['p'], snapshot_os),
         'files': files,
         'dirs': dirs,
-        'S': path_obj.get('S', 0),  # Total size including subdirectories
-        'C': path_obj.get('C', 0),  # Total file count including subdirectories
+        'S': path_obj.get('S', 0),
+        'C': path_obj.get('C', 0),
         'total_size_formatted': format_bytes(path_obj.get('S', 0))
     }
 
 
+def _in_any_group(groups_dict, group_names, item_type, item_path):
+    for group_name in group_names:
+        group = groups_dict.get(group_name)
+        if group and item_path in group[item_type]:
+            return True
+    return False
+
+
 def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc=False):
     """Filter path content based on groups"""
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
-    
-    # Get OS from snapshot data
-    snapshot_os = loaded_snapshots[snapshot_filename]['data'][0].get('os_name') if snapshot_filename in loaded_snapshots else None
+    entry = loaded_snapshots[snapshot_filename]
+    groups_dict = entry['groups']
+    index = entry['index']
+    data = entry['data']
+    snapshot_os = get_snapshot_os(snapshot_filename)
 
-    # Filter files
     filtered_files = []
     for i, filename in enumerate(path_obj.get('f', [])):
         file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
 
-        # Check if file should be filtered out
-        should_filter_out = False
-        for group_name in filter_out:
-            if (group_name in groups_dict and
-                file_path in groups_dict[group_name]['f']):
-                should_filter_out = True
-                break
-
-        if should_filter_out:
+        if _in_any_group(groups_dict, filter_out, 'f', file_path):
+            continue
+        if filter_in and not _in_any_group(groups_dict, filter_in, 'f', file_path):
             continue
 
-        # If filter_in is specified, only include files in those groups
-        if filter_in:
-            should_include = False
-            for group_name in filter_in:
-                if (group_name in groups_dict and
-                    file_path in groups_dict[group_name]['f']):
-                    should_include = True
-                    break
-            if not should_include:
-                continue
+        filtered_files.append(_file_entry(path_obj, i))
 
-        size = path_obj['s'][i] if i < len(path_obj['s']) else 0
-        timestamps = path_obj['t'][i] if i < len(path_obj['t']) else [None, None, None]
-
-        filtered_files.append({
-            'name': filename,
-            'size': size,
-            'size_formatted': format_bytes(size),
-            'created': timestamps[0],
-            'modified': timestamps[1],
-            'accessed': timestamps[2]
-        })
-
-    # Filter directories
     filtered_dirs = []
     for i, dirname in enumerate(path_obj.get('d', [])):
         dir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
 
-        # Check if directory should be filtered out
-        should_filter_out = False
-        for group_name in filter_out:
-            if (group_name in groups_dict and
-                dir_path in groups_dict[group_name]['d']):
-                should_filter_out = True
-                break
-
-        if should_filter_out:
+        if _in_any_group(groups_dict, filter_out, 'd', dir_path):
+            continue
+        if filter_in and not _in_any_group(groups_dict, filter_in, 'd', dir_path):
             continue
 
-        # If filter_in is specified, only include directories in those groups
-        if filter_in:
-            should_include = False
-            for group_name in filter_in:
-                if (group_name in groups_dict and
-                    dir_path in groups_dict[group_name]['d']):
-                    should_include = True
-                    break
-            if not should_include:
-                continue
+        dir_info = _dir_entry(path_obj, i)
 
-        timestamps = path_obj['T'][i] if i < len(path_obj['T']) else [None, None, None]
-
-        # Get sub counts and total size for this directory (calculated recursively)
-        subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
-
-        dir_info = {
-            'name': dirname,
-            'created': timestamps[0],
-            'modified': timestamps[1],
-            'accessed': timestamps[2]
-        }
-
-        # Add recursive size and count if available
-        if subdir_path in loaded_snapshots[snapshot_filename]['index']:
-            subdir_idx = loaded_snapshots[snapshot_filename]['index'][subdir_path]
-            subdir_obj = loaded_snapshots[snapshot_filename]['data'][subdir_idx]
-
+        subdir_idx = index.get(dir_path)
+        if subdir_idx is not None:
+            subdir_obj = data[subdir_idx]
             if recursive_calc:
-                # Calculate filtered sizes and counts recursively based on the filters
-                filtered_size, filtered_count = calculate_filtered_recursive_totals(
+                size, count = calculate_filtered_recursive_totals(
                     subdir_obj, snapshot_filename, filter_in, filter_out
                 )
-                dir_info['S'] = filtered_size
-                dir_info['C'] = filtered_count
-                dir_info['size_formatted'] = format_bytes(filtered_size)
-                dir_info['file_count'] = filtered_count
+                _apply_totals(dir_info, size, count)
             else:
-                dir_info['S'] = subdir_obj.get('S', 0)  # Total size including subdirectories
-                dir_info['C'] = subdir_obj.get('C', 0)  # Total file count including subdirectories
-                dir_info['size_formatted'] = format_bytes(subdir_obj.get('S', 0))
-                dir_info['file_count'] = subdir_obj.get('C', 0)
-        else:
-            print("Subdirectory path not found in index:", subdir_path)
+                _apply_totals(dir_info, subdir_obj.get('S', 0), subdir_obj.get('C', 0))
+
         filtered_dirs.append(dir_info)
 
     return {
-        'current_path': path_obj['p'],
+        'current_path': to_web_path(path_obj['p'], snapshot_os),
         'files': filtered_files,
         'dirs': filtered_dirs,
         'filtered': True
     }
 
 
-def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict, files=None, dirinFilterSet=None, allIncluded=False):
-    """Recursively for a directory and its subdirectories based on filters"""
-    # print("Filtering on path:", path_obj['p'])
-    # Start with files directly in this directory that pass the filter
+def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict,
+                       files=None, dirinFilterSet=None, allIncluded=False):
+    """Recursively total a directory tree, honouring the group filters.
+
+    Returns (total_size, total_count) and, when ``files`` is provided,
+    appends every matching file to it.
+    """
     total_size = 0
     total_count = 0
-    
-    # Get OS from the first snapshot object
+
     snapshot_os = data[0].get('os_name') if data else None
 
     for i, filename in enumerate(path_obj.get('f', [])):
         file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
-        # Check if file should be filtered out
-        should_filter_out = False
-        for group_name in filter_out:
-            if (group_name in groups_dict and
-                file_path in groups_dict[group_name]['f']):
-                should_filter_out = True
-                break
 
-        if should_filter_out:
+        if _in_any_group(groups_dict, filter_out, 'f', file_path):
             continue
 
-        # If filter_in is specified, only include files in those groups
         should_include = True
         if filter_in and not allIncluded:
-            should_include = False
-            for group_name in filter_in:
-                if (group_name in groups_dict and
-                    file_path in groups_dict[group_name]['f']):
-                    should_include = True
-                    break
+            should_include = _in_any_group(groups_dict, filter_in, 'f', file_path)
 
         if should_include:
-            size = path_obj['s'][i] if i < len(path_obj['s']) else 0
+            size = path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0
             total_size += size
             total_count += 1
             if files is not None:
@@ -535,77 +545,80 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
                     'name': filename,
                     'full_path': file_path,
                     'size': size,
-                    'created': path_obj['t'][i][0] if i < len(path_obj['t']) else None,
+                    'created': path_obj['t'][i][0] if i < len(path_obj.get('t', [])) else None,
                 })
 
-    # Process all subdirectories of the current path
     for dirname in path_obj.get('d', []):
         needAllIncludeSubDirs = allIncluded
         subdir_path = join_snapshot_path(path_obj['p'], dirname, snapshot_os=snapshot_os)
-        should_filter_out = False
-        for group_name in filter_out:
-            if (group_name in groups_dict and
-                subdir_path in groups_dict[group_name]['d']):
-                should_filter_out = True
-                break
-        if should_filter_out:
+
+        if _in_any_group(groups_dict, filter_out, 'd', subdir_path):
             continue
+
         should_include = True
         if filter_in and not needAllIncludeSubDirs:
             should_include = False
             if dirinFilterSet is not None and subdir_path in dirinFilterSet:
                 should_include = True
-                for group_name in filter_in:
-                    if (group_name in groups_dict and
-                        subdir_path in groups_dict[group_name]['d']):
-                        needAllIncludeSubDirs = True
-                        break
+                if _in_any_group(groups_dict, filter_in, 'd', subdir_path):
+                    needAllIncludeSubDirs = True
 
         if not should_include:
             continue
-        if subdir_path in path_index:
-            subdir_idx = path_index[subdir_path]
-            subdir_obj = data[subdir_idx]
 
-            # Recursively calculate for the subdirectory
-            subdir_total_size, subdir_total_count = filter_on_snapshot(subdir_obj, data, path_index,
-                filter_in, filter_out, groups_dict, files, dirinFilterSet, needAllIncludeSubDirs)
+        subdir_idx = path_index.get(subdir_path)
+        if subdir_idx is None:
+            continue
 
-            # Add the subdirectory's totals to the current directory's totals
-            total_size += subdir_total_size
-            total_count += subdir_total_count
+        subdir_total_size, subdir_total_count = filter_on_snapshot(
+            data[subdir_idx], data, path_index, filter_in, filter_out,
+            groups_dict, files, dirinFilterSet, needAllIncludeSubDirs,
+        )
+
+        total_size += subdir_total_size
+        total_count += subdir_total_count
 
     return total_size, total_count
 
 
 def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
-    return filter_on_snapshot(path_obj, loaded_snapshots[snapshot_filename]["data"],
-                        loaded_snapshots[snapshot_filename]["index"], filter_in, 
-                        filter_out, loaded_snapshots[snapshot_filename]["groups"],
-                        None)
+    entry = loaded_snapshots[snapshot_filename]
+    return filter_on_snapshot(
+        path_obj, entry['data'], entry['index'],
+        filter_in, filter_out, entry['groups'], None,
+    )
 
 
 def get_filtered_files(snapshot_filename, filter_in, filter_out):
     """Get files from a snapshot that match the filter criteria"""
-    if snapshot_filename not in loaded_snapshots:
+    entry = loaded_snapshots.get(snapshot_filename)
+    if not entry or not entry['data']:
         return []
 
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    index = loaded_snapshots[snapshot_filename]['index']
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
-    path_obj = snapshot_data[0]  # Start from root
-    filtered_files = []
+    snapshot_data = entry['data']
+    index = entry['index']
+    groups_dict = entry['groups']
+    snapshot_os = snapshot_data[0].get('os_name')
+
+    # Every ancestor of a selected file or directory must stay walkable,
+    # otherwise the recursion stops before it reaches the selection.
     dirinFilterSet = set()
-    for gin in filter_in:
-        if gin in groups_dict:
-            for fpath in groups_dict[gin]['d']:
-                while True:
-                    dirinFilterSet.add(fpath)
-                    ii = fpath.rfind(os.path.sep)
-                    if ii == -1:
-                        break
-                    fpath = fpath[:ii]
-    # print(dirinFilterSet)
-    filter_on_snapshot(path_obj, snapshot_data, index, filter_in,
-                        filter_out, groups_dict, filtered_files, dirinFilterSet)
+    for group_name in filter_in:
+        group = groups_dict.get(group_name)
+        if not group:
+            continue
+        for item_path in list(group['d']) + list(group['f']):
+            parent = snapshot_dirname(item_path, snapshot_os=snapshot_os)
+            while parent:
+                if parent in dirinFilterSet:
+                    break
+                dirinFilterSet.add(parent)
+                parent = snapshot_dirname(parent, snapshot_os=snapshot_os)
+        dirinFilterSet.update(group['d'])
+
+    filtered_files = []
+    filter_on_snapshot(
+        snapshot_data[0], snapshot_data, index, filter_in,
+        filter_out, groups_dict, filtered_files, dirinFilterSet,
+    )
     return filtered_files

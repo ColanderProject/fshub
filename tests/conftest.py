@@ -1,0 +1,72 @@
+"""Shared pytest fixtures for fshub tests."""
+
+import gzip
+import json
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from fshub import config as config_module  # noqa: E402
+from fshub.api import backup as backup_module  # noqa: E402
+from fshub.api.explorer import loaded_snapshots  # noqa: E402
+from fshub.web import create_app  # noqa: E402
+
+
+@pytest.fixture
+def config(tmp_path, monkeypatch):
+    """A Config pointing at an isolated data directory."""
+    cfg = config_module.Config.__new__(config_module.Config)
+    cfg.data_path = str(tmp_path / 'data')
+    cfg.listen_ip = 'localhost'
+    cfg.listen_port = 7303
+    cfg.config_path = None
+    cfg.ensure_dirs()
+
+    monkeypatch.setattr(config_module, '_config', cfg)
+    return cfg
+
+
+@pytest.fixture
+def app(config):
+    application, _ = create_app(config)
+    application.config['TESTING'] = True
+    yield application
+    loaded_snapshots.clear()
+    backup_module.backup_tasks.clear()
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+@pytest.fixture
+def sample_tree(tmp_path):
+    """A real on-disk tree: root/a.txt, root/sub/b.txt, root/sub/deep/c.txt."""
+    root = tmp_path / 'tree'
+    (root / 'sub' / 'deep').mkdir(parents=True)
+    (root / 'a.txt').write_bytes(b'a' * 10)
+    (root / 'sub' / 'b.txt').write_bytes(b'b' * 20)
+    (root / 'sub' / 'deep' / 'c.txt').write_bytes(b'c' * 30)
+    return root
+
+
+def write_snapshot(config, filename, records):
+    """Write a snapshot file directly, for tests that don't need a real scan."""
+    path = os.path.join(config.snapshot_dir, filename)
+    with gzip.open(path, 'wt', encoding='utf-8') as f:
+        for record in records:
+            f.write(json.dumps(record) + '\n')
+    return path
+
+
+@pytest.fixture
+def scanned_snapshot(config, sample_tree):
+    """Scan sample_tree and return the resulting snapshot filename."""
+    from fshub.scanning import run_scan_to_snapshot
+
+    result = run_scan_to_snapshot(str(sample_tree))
+    return result['result_file']

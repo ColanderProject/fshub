@@ -1,85 +1,114 @@
 """Device management API endpoints"""
 
-from flask import Blueprint, request, jsonify
-import os
 import json
-import socket
-from ..config import Config
-from ..utils import get_system_info
+import os
+
+from flask import Blueprint, request, jsonify
+
+from ..config import get_config
+from ..utils import UnsafePathError, get_system_info, safe_join
 
 device_bp = Blueprint('device_bp', __name__)
 
-# Global variable to store loaded devices
-loaded_devices = {}
-current_device = None
+DEVICE_PREFIX = 'devices_'
+MEDIA_PREFIX = 'media_'
+DEVICE_SUFFIX = '.jl'
+
+
+def _device_file(hostname, prefix):
+    """Resolve a per-host data file, refusing anything that escapes the dir."""
+    return safe_join(
+        get_config().devices_dir,
+        f'{prefix}{hostname}{DEVICE_SUFFIX}',
+        what='host name',
+    )
+
+
+def _read_jl(path):
+    records = []
+    if not os.path.exists(path):
+        return records
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+    return records
+
+
+def _load_all_devices():
+    devices_dir = get_config().devices_dir
+    try:
+        entries = os.listdir(devices_dir)
+    except OSError:
+        return []
+
+    all_devices = []
+    for name in sorted(entries):
+        if name.startswith(DEVICE_PREFIX) and name.endswith(DEVICE_SUFFIX):
+            all_devices.extend(_read_jl(os.path.join(devices_dir, name)))
+    return all_devices
+
+
+def _device_key(device):
+    """Identify a device by thumbprint, falling back to host name."""
+    return device.get('thumbprint') or device.get('host_name')
 
 
 @device_bp.route('/api/v1/devices', methods=['GET'])
 def get_devices():
     """Get all devices"""
-    config = Config()
-    devices_dir = os.path.join(config.data_path, 'devices')
-    
-    # Load all device files
-    device_files = [f for f in os.listdir(devices_dir) if f.startswith('devices_') and f.endswith('.jl')]
-    
-    all_devices = []
-    for file in device_files:
-        filepath = os.path.join(devices_dir, file)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    device = json.loads(line)
-                    all_devices.append(device)
-    
-    # Check if current device is in the list
-    current_hostname = socket.gethostname()
-    current_device_exists = any(device.get('host_name') == current_hostname for device in all_devices)
-    
+    # Later records for the same device win, so an update overwrites the old one.
+    unique = {}
+    for device in _load_all_devices():
+        unique[_device_key(device)] = device
+
+    current_info = get_system_info()
+    current_known = _device_key(current_info) in unique
+
     return jsonify({
-        'devices': all_devices,
-        'current_device_known': current_device_exists,
-        'current_device_info': get_system_info()
+        'devices': list(unique.values()),
+        'current_device_known': current_known,
+        'current_device_info': current_info
     })
 
 
 @device_bp.route('/api/v1/devices', methods=['POST'])
 def add_device():
-    """Add a new device"""
-    config = Config()
-    device = request.get_json()
-    
-    device_file = f"devices_{device['host_name']}.jl"
-    devices_path = os.path.join(config.data_path, 'devices', device_file)
-    
+    """Add or update a device"""
+    device = request.get_json(silent=True) or {}
+    hostname = device.get('host_name')
+
+    if not hostname:
+        return jsonify({'error': 'host_name is required'}), 400
+
+    try:
+        devices_path = _device_file(hostname, DEVICE_PREFIX)
+        media_path = _device_file(hostname, MEDIA_PREFIX)
+    except UnsafePathError as e:
+        return jsonify({'error': str(e)}), 400
+
+    media = device.pop('media', None)
+
     with open(devices_path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(device) + '\n')
-    
-    # Also save media info if provided
-    if 'media' in device:
-        media_file = f"media_{device['host_name']}.jl"
-        media_path = os.path.join(config.data_path, 'devices', media_file)
+
+    if media is not None:
         with open(media_path, 'w', encoding='utf-8') as f:
-            for media in device['media']:
-                f.write(json.dumps(media) + '\n')
-    
+            for item in media:
+                f.write(json.dumps(item) + '\n')
+
     return jsonify({'success': True})
 
 
 @device_bp.route('/api/v1/device/<hostname>/media', methods=['GET'])
 def get_device_media(hostname):
     """Get media information for a specific device"""
-    config = Config()
-    media_file = f"media_{hostname}.jl"
-    media_path = os.path.join(config.data_path, 'devices', media_file)
-    
-    if not os.path.exists(media_path):
-        return jsonify({'media': []})
-    
-    media_list = []
-    with open(media_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                media_list.append(json.loads(line))
-    
-    return jsonify({'media': media_list})
+    try:
+        media_path = _device_file(hostname, MEDIA_PREFIX)
+    except UnsafePathError as e:
+        return jsonify({'error': str(e)}), 400
+
+    return jsonify({'media': _read_jl(media_path)})
