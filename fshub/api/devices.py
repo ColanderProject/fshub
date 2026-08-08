@@ -8,7 +8,7 @@ import time
 from flask import Blueprint, request, jsonify
 
 from ..config import get_config
-from ..utils import UnsafePathError, get_system_info, safe_join
+from ..utils import UnsafePathError, encode_name_component, get_system_info, safe_join
 
 device_bp = Blueprint('device_bp', __name__)
 
@@ -38,10 +38,17 @@ def _next_stamp():
 
 
 def _device_file(hostname, prefix):
-    """Resolve a per-host data file, refusing anything that escapes the dir."""
+    """Resolve a per-host data file, refusing anything that escapes the dir.
+
+    The host name is percent-encoded rather than rejected: names such as
+    "Ann's MacBook Pro" or "办公室-PC" are perfectly normal and must stay
+    registrable. Plain ASCII names encode to themselves, so files written by
+    earlier versions keep being found.
+    """
+    encoded = encode_name_component(hostname, what='host name')
     return safe_join(
         get_config().devices_dir,
-        f'{prefix}{hostname}{DEVICE_SUFFIX}',
+        f'{prefix}{encoded}{DEVICE_SUFFIX}',
         what='host name',
     )
 

@@ -44,13 +44,23 @@ def _init_counters(counters, current_path):
 
 def _normalize_skip_prefixes(skip_prefixes):
     """Normalize configured skip prefixes."""
-    return [_normalize_prefix(path) for path in skip_prefixes if path]
+    return [_normalize_prefix(path).rstrip(os.sep) or os.sep
+            for path in skip_prefixes if path]
 
 
 def _should_skip_path(path, normalized_skip_prefixes):
-    """Return True when a path starts with any configured skip prefix."""
+    """Return True when a path is, or lives under, a configured skip prefix.
+
+    Whole path components are compared, mirroring is_related_path: skipping
+    ``/home/a`` must not also skip the unrelated sibling ``/home/ab``.
+    """
     normalized_path = _normalize_prefix(path)
-    return any(normalized_path.startswith(prefix) for prefix in normalized_skip_prefixes)
+    for prefix in normalized_skip_prefixes:
+        if normalized_path == prefix:
+            return True
+        if normalized_path.startswith(prefix.rstrip(os.sep) + os.sep):
+            return True
+    return False
 
 
 def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):

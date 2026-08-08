@@ -91,7 +91,7 @@ def config_gen():
     '--skip-path',
     'skip_paths',
     multiple=True,
-    help='Skip any path whose normalized absolute path starts with this prefix. Repeat for multiple prefixes.',
+    help='Skip this path and everything under it. Repeat for multiple paths.',
 )
 def scan(path, use_index, skip_paths):
     """Scan a directory and save a snapshot."""

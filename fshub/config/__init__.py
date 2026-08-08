@@ -58,7 +58,15 @@ class Config:
 
         self.data_path = os.path.expanduser(config_data.get('data_path', self.data_path))
         self.listen_ip = config_data.get('listen_ip', self.listen_ip)
-        self.listen_port = int(config_data.get('listen_port', self.listen_port))
+
+        # A malformed port must not take the whole process down: every other
+        # problem in this file is reported and then ignored.
+        listen_port = config_data.get('listen_port', self.listen_port)
+        try:
+            self.listen_port = int(listen_port)
+        except (TypeError, ValueError):
+            print(f"Invalid listen_port {listen_port!r} in {config_path}, "
+                  f"using {self.listen_port}")
 
     # -- derived paths ---------------------------------------------------
 

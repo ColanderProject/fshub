@@ -1,5 +1,6 @@
 """Utility functions for fshub"""
 
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -13,7 +14,43 @@ class UnsafePathError(ValueError):
     """Raised when a user supplied name would escape its base directory."""
 
 
-_SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._-]+$')
+# '%' is allowed so percent-encoded components (see encode_name_component)
+# stay valid; it can never be used to escape a directory.
+_SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._%-]+$')
+_SAFE_CHAR_RE = re.compile(r'[A-Za-z0-9._-]')
+
+# Keep generated file names well below the 255 byte limit of common file
+# systems, leaving room for the caller's prefix and suffix.
+MAX_NAME_LENGTH = 120
+
+
+def encode_name_component(value, what='name'):
+    """Turn arbitrary text into a safe, reversible-enough file name part.
+
+    Host names may legitimately contain spaces, quotes or non-ASCII
+    characters ("Ann's MacBook Pro", "办公室-PC"), so rejecting them would
+    make the device registry unusable on perfectly normal machines. Instead
+    every character outside the safe set is percent-encoded, which keeps the
+    mapping injective (distinct values never share a file) while guaranteeing
+    the result cannot escape its directory.
+    """
+    if not isinstance(value, str) or not value:
+        raise UnsafePathError(f'Invalid {what}: value is required')
+
+    encoded = ''.join(
+        ch if _SAFE_CHAR_RE.fullmatch(ch)
+        else ''.join(f'%{byte:02X}' for byte in ch.encode('utf-8'))
+        for ch in value
+    )
+
+    # '.'/'..' are valid host names but not valid file names, and an overly
+    # long name would fail at open() time; both fall back to a deterministic
+    # digest so the record still has a stable home.
+    if encoded in ('.', '..') or len(encoded) > MAX_NAME_LENGTH:
+        digest = hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
+        encoded = encoded[: MAX_NAME_LENGTH - len(digest) - 1] + '-' + digest
+
+    return encoded
 
 
 def sanitize_name(name, what='name'):

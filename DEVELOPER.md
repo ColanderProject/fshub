@@ -40,8 +40,12 @@ What the application *is* responsible for:
 
 - **Never escaping its own data directory.** Any user-supplied name that ends
   up in a file path goes through `utils.sanitize_name` / `utils.safe_join`
-  (`UnsafePathError` on violation). This covers snapshot names, group logs and
-  per-host device files.
+  (`UnsafePathError` on violation). This covers snapshot names and group logs.
+  Values that users do not choose freely (host names may contain spaces,
+  quotes or non-ASCII text) are instead percent-encoded with
+  `utils.encode_name_component`, which is injective and always produces a
+  name that `sanitize_name` accepts — rejecting them outright would make the
+  device registry unusable on perfectly normal machines.
 - **Never writing outside a backup target.** Snapshot paths are converted with
   `utils.snapshot_relative_path`, which strips leading separators, Windows
   drive letters and `..` segments; `utils.ensure_within` double-checks the

@@ -40,6 +40,32 @@ def test_scan_skip_prefixes(config, sample_tree):
     assert counters['scanned_size'] == 10
 
 
+def test_scan_skip_prefix_does_not_match_sibling(config, sample_tree):
+    """Skipping "sub" must not also skip an unrelated sibling "subtitles"."""
+    sibling = sample_tree / 'subtitles'
+    sibling.mkdir()
+    (sibling / 'd.txt').write_bytes(b'd' * 40)
+
+    counters = {}
+    run_scan_to_snapshot(
+        str(sample_tree),
+        counters=counters,
+        skip_prefixes=[str(sample_tree / 'sub')],
+    )
+    assert counters['scanned_count'] == 2
+    assert counters['scanned_size'] == 10 + 40
+
+
+def test_scan_skip_prefix_tolerates_trailing_separator(config, sample_tree):
+    counters = {}
+    run_scan_to_snapshot(
+        str(sample_tree),
+        counters=counters,
+        skip_prefixes=[str(sample_tree / 'sub') + os.sep],
+    )
+    assert counters['scanned_count'] == 1
+
+
 def test_scan_endpoint_rejects_bad_input(client):
     assert client.post('/api/v1/scan', json={'path': '/definitely/not/here'}).status_code == 400
     assert client.post('/api/v1/scan', json={'path': '', 'skip_paths': 'x'}).status_code == 400

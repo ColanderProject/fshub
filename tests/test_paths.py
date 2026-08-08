@@ -1,9 +1,12 @@
 """Tests for path safety helpers and the endpoints that rely on them."""
 
+import os
+
 import pytest
 
 from fshub.utils import (
     UnsafePathError,
+    encode_name_component,
     ensure_within,
     safe_join,
     sanitize_name,
@@ -84,6 +87,61 @@ def test_device_media_rejects_traversal(client):
     assert response.status_code in (400, 404)
 
 
-def test_add_device_rejects_bad_hostname(client):
+def test_add_device_neutralizes_traversal_hostname(client, config):
+    """A traversal-looking host name is encoded, never used as a path."""
     response = client.post('/api/v1/devices', json={'host_name': '../evil'})
-    assert response.status_code == 400
+    assert response.status_code == 200
+
+    written = os.listdir(config.devices_dir)
+    assert written == ['devices_..%2Fevil.jl']
+    assert not os.path.exists(os.path.join(config.data_path, '..', 'evil'))
+
+
+@pytest.mark.parametrize('value,expected', [
+    # Plain names must stay untouched so existing files keep being found.
+    ('host.local', 'host.local'),
+    ('web-1', 'web-1'),
+    ("Ann's MacBook Pro", 'Ann%27s%20MacBook%20Pro'),
+    ('\u529e\u516c\u5ba4-PC', '%E5%8A%9E%E5%85%AC%E5%AE%A4-PC'),
+    ('a/b', 'a%2Fb'),
+    ('..%2f..', '..%252f..'),
+])
+def test_encode_name_component(value, expected):
+    assert encode_name_component(value) == expected
+    # Whatever comes out must be usable as a file name component.
+    sanitize_name(encode_name_component(value))
+
+
+def test_encode_name_component_is_injective_for_tricky_names():
+    names = ['a b', 'a%20b', 'a/b', 'a%2Fb', '.', '..', 'x' * 400, 'y' * 400]
+    assert len({encode_name_component(n) for n in names}) == len(names)
+
+
+def test_encode_name_component_shortens_long_names():
+    encoded = encode_name_component('h' * 500)
+    assert len(encoded) <= 120
+    sanitize_name(encoded)
+
+
+@pytest.mark.parametrize('value', ['', None, 123])
+def test_encode_name_component_requires_text(value):
+    with pytest.raises(UnsafePathError):
+        encode_name_component(value)
+
+
+def test_device_roundtrip_with_unusual_hostname(client):
+    """Host names with spaces or non-ASCII are normal, not an attack."""
+    hostname = "Ann's MacBook Pro \u529e\u516c\u5ba4"
+
+    response = client.post('/api/v1/devices', json={
+        'host_name': hostname,
+        'thumbprint': 'tp-1',
+        'media': [{'name': 'disk0'}],
+    })
+    assert response.status_code == 200
+
+    devices = client.get('/api/v1/devices').get_json()['devices']
+    assert [d['host_name'] for d in devices] == [hostname]
+
+    media = client.get(f'/api/v1/device/{hostname}/media')
+    assert media.get_json() == {'media': [{'name': 'disk0'}]}
