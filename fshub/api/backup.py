@@ -101,17 +101,22 @@ def _create_task(total_files):
 
 
 def _open_log(backup_target_name, backup_name, file_count, meta):
-    """Create the backup log inside the configured data directory."""
+    """Create the backup log inside the configured data directory.
+
+    Returns (log, run_id); run_id also names the archives of a zip run so
+    successive backups into one directory do not overwrite each other.
+    """
     log_dir = get_config().backup_log_dir
     os.makedirs(log_dir, exist_ok=True)
 
     timestamp = int(time.time())
     target = sanitize_name(backup_target_name, what='backup_target_name')
     name = sanitize_name(backup_name, what='backup_name')
+    run_id = f'{name}_{timestamp}'
     log_path = os.path.join(log_dir, f'{target}_{name}_{file_count}_{timestamp}.jl')
 
-    meta = dict(meta, timestamp=timestamp)
-    return BackupLog(log_path, meta)
+    meta = dict(meta, timestamp=timestamp, run_id=run_id)
+    return BackupLog(log_path, meta), run_id
 
 
 def _prepare_backup(data, backup_type):
@@ -186,7 +191,7 @@ def create_zip_backup():
         return jsonify({'error': 'max_file_size must be positive'}), 400
 
     try:
-        log = _open_log(
+        log, run_id = _open_log(
             ctx['meta']['backup_target_name'], ctx['meta']['backup_name'],
             len(ctx['files']), ctx['meta'],
         )
@@ -197,7 +202,7 @@ def create_zip_backup():
     threading.Thread(
         target=perform_zip_backup,
         args=(task_id, ctx['files'], ctx['target_path'], compress_level,
-              max_file_size, log, ctx['snapshot_os']),
+              max_file_size, log, ctx['snapshot_os'], run_id),
         daemon=True,
     ).start()
 
@@ -227,7 +232,7 @@ def create_folder_backup():
         })
 
     try:
-        log = _open_log(
+        log, _run_id = _open_log(
             ctx['meta']['backup_target_name'], ctx['meta']['backup_name'],
             len(ctx['files']), ctx['meta'],
         )
@@ -274,7 +279,7 @@ def stop_backup_task(task_id):
 
 
 def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
-                       max_file_size, log, snapshot_os):
+                       max_file_size, log, snapshot_os, run_id):
     """Perform the actual zip backup in a separate thread"""
     try:
         os.makedirs(target_path, exist_ok=True)
@@ -285,9 +290,12 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
         zip_index = 0
 
         while files_processed < total:
-            zip_filename = os.path.join(target_path, f'backup_{zip_index:03d}.zip')
+            # Archives carry the run id, so backing up twice into the same
+            # directory adds a new set instead of destroying the previous one.
+            zip_filename = os.path.join(target_path, f'{run_id}_{zip_index:03d}.zip')
 
-            with zipfile.ZipFile(zip_filename, 'w', compression=zipfile.ZIP_DEFLATED,
+            # 'x' rather than 'w': never silently clobber an existing archive.
+            with zipfile.ZipFile(zip_filename, 'x', compression=zipfile.ZIP_DEFLATED,
                                  compresslevel=compress_level) as zipf:
                 chunk_size = 0
 

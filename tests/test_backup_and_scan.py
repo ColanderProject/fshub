@@ -5,6 +5,8 @@ import time
 
 import pytest
 
+from conftest import select_all_files, wait_for_task
+
 from fshub.scanning import is_related_path, run_scan_to_snapshot
 
 
@@ -63,27 +65,9 @@ def test_unknown_scan_id_is_404(client):
     assert client.get('/api/v1/scan/nope').status_code == 404
 
 
-def _select_all(client, snapshot, sample_tree):
-    """Put every file of the sample tree into a group named 'all'."""
-    for rel in ('a.txt', 'sub/b.txt', 'sub/deep/c.txt'):
-        client.post(f'/api/v1/group/{snapshot}/add_file', json={
-            'path': os.path.join(str(sample_tree), *rel.split('/')),
-            'group_name': 'all',
-        })
-
-
-def _wait_for_task(client, task_id):
-    for _ in range(200):
-        status = client.get(f'/api/v1/backup/status/{task_id}').get_json()
-        if status['status'] in ('completed', 'error', 'cancelled'):
-            return status
-        time.sleep(0.02)
-    pytest.fail(f'backup task {task_id} did not finish')
-
-
 def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_path):
     client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
-    _select_all(client, scanned_snapshot, sample_tree)
+    select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'out'
     response = client.post('/api/v1/backup/folder', json={
@@ -93,7 +77,7 @@ def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_p
     })
     assert response.status_code == 200
 
-    status = _wait_for_task(client, response.get_json()['task_id'])
+    status = wait_for_task(client, response.get_json()['task_id'])
     assert status['status'] == 'completed'
     assert status['completed_files'] == 3
 
@@ -111,7 +95,7 @@ def test_zip_backup_creates_archive(client, scanned_snapshot, sample_tree, tmp_p
     import zipfile
 
     client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
-    _select_all(client, scanned_snapshot, sample_tree)
+    select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'zips'
     response = client.post('/api/v1/backup/zip', json={
@@ -120,7 +104,7 @@ def test_zip_backup_creates_archive(client, scanned_snapshot, sample_tree, tmp_p
         'filter_in': ['all'],
     })
     assert response.status_code == 200
-    status = _wait_for_task(client, response.get_json()['task_id'])
+    status = wait_for_task(client, response.get_json()['task_id'])
     assert status['status'] == 'completed'
 
     archives = sorted(target.glob('*.zip'))
@@ -155,7 +139,7 @@ def test_backup_validates_input(client, scanned_snapshot, tmp_path):
 
 def test_backup_dry_run_does_not_write(client, scanned_snapshot, sample_tree, tmp_path):
     client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
-    _select_all(client, scanned_snapshot, sample_tree)
+    select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'dry'
     data = client.post('/api/v1/backup/folder', json={
@@ -172,7 +156,7 @@ def test_backup_dry_run_does_not_write(client, scanned_snapshot, sample_tree, tm
 
 def test_hash_calculate_and_duplicates(client, scanned_snapshot, sample_tree):
     client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
-    _select_all(client, scanned_snapshot, sample_tree)
+    select_all_files(client, scanned_snapshot, sample_tree)
 
     data = client.post('/api/v1/hash/calculate', json={
         'snapshot_filename': scanned_snapshot,

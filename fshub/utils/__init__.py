@@ -193,8 +193,6 @@ def join_snapshot_path(base_path, *paths, snapshot_os=None):
     
     # Choose separator based on snapshot's OS
     if snapshot_os == 'Windows':
-        separator = '\\'
-        
         # Special case: Windows root "/" with drive letters
         if base_path == '/' and paths:
             # Check if the first path component is a drive letter (e.g., "C:")
@@ -217,14 +215,14 @@ def join_snapshot_path(base_path, *paths, snapshot_os=None):
             if path:
                 result = result.rstrip('\\') + '\\' + path.lstrip('\\/')
     else:
-        # Unix-like systems (Linux, Darwin, etc.)
-        separator = '/'
-        # Convert any backslashes to forward slashes
-        result = base_path.replace('\\', '/')
+        # Unix-like systems (Linux, Darwin, etc.). Backslashes are ordinary
+        # file name characters here, so they must be left alone: rewriting
+        # them would rename "a\b" to "a/b" and collide with a real "a/b".
+        result = base_path
         for path in paths:
             if path:
-                result = result.rstrip('/') + '/' + path.lstrip('\\/')
-    
+                result = result.rstrip('/') + '/' + path.lstrip('/')
+
     return result
 
 

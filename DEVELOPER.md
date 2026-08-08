@@ -96,7 +96,10 @@ A snapshot taken on Windows can be browsed from a Linux server, so **never use
 - `snapshot_relative_path(path, snapshot_os)` — for backup destinations.
   Note it only treats `\` as a separator for Windows snapshots: POSIX allows
   backslashes and colons inside file names, and normalising them would make
-  two distinct sources collide on one destination.
+  two distinct sources collide on one destination. `join_snapshot_path`
+  follows the same rule — on POSIX it neither rewrites `\` in the base path
+  nor strips it from a component, otherwise a directory named `a\b` silently
+  merges with a real `a/b`.
 - `explorer.to_web_path` / `explorer.from_web_path` — the UI only ever sees
   the normalized form (`C:\Users` ⇄ `/C:/Users`)
 

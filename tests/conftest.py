@@ -70,3 +70,27 @@ def scanned_snapshot(config, sample_tree):
 
     result = run_scan_to_snapshot(str(sample_tree))
     return result['result_file']
+
+
+def select_all_files(client, snapshot, tree, group_name='all'):
+    """Put every file of a scanned tree into one group."""
+    from fshub.api.explorer import get_filtered_files
+
+    for file_info in get_filtered_files(snapshot, [], []):
+        client.post(f'/api/v1/group/{snapshot}/add_file', json={
+            'path': file_info['full_path'],
+            'group_name': group_name,
+        })
+
+
+def wait_for_task(client, task_id, timeout=4.0):
+    """Block until a backup task leaves the running state."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f'/api/v1/backup/status/{task_id}').get_json()
+        if status['status'] in ('completed', 'error', 'cancelled'):
+            return status
+        time.sleep(0.02)
+    pytest.fail(f'backup task {task_id} did not finish within {timeout}s')

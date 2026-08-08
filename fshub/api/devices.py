@@ -88,8 +88,15 @@ def _load_all_devices():
 
 
 def _device_key(device):
-    """Identify a device by thumbprint, falling back to host name."""
-    return device.get('thumbprint') or device.get('host_name')
+    """Identify a device by thumbprint, falling back to host name.
+
+    Returns None for records that carry no usable identity, so a malformed
+    file written by an older build cannot break the whole endpoint.
+    """
+    for candidate in (device.get('thumbprint'), device.get('host_name')):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
 
 
 @device_bp.route('/api/v1/devices', methods=['GET'])
@@ -101,6 +108,8 @@ def get_devices():
     best = {}
     for order, device in _load_all_devices():
         key = _device_key(device)
+        if key is None:
+            continue
         if key not in best or order > best[key][0]:
             best[key] = (order, device)
 
@@ -118,10 +127,23 @@ def get_devices():
 def add_device():
     """Add or update a device"""
     device = request.get_json(silent=True) or {}
-    hostname = device.get('host_name')
 
-    if not hostname:
-        return jsonify({'error': 'host_name is required'}), 400
+    if not isinstance(device, dict):
+        return jsonify({'error': 'Device must be a JSON object'}), 400
+
+    hostname = device.get('host_name')
+    if not isinstance(hostname, str) or not hostname:
+        return jsonify({'error': 'host_name must be a non-empty string'}), 400
+
+    # A non-string thumbprint would later be used as a dict key and break
+    # every read of this endpoint, permanently: the bad record is durable.
+    thumbprint = device.get('thumbprint')
+    if thumbprint is not None and (not isinstance(thumbprint, str) or not thumbprint):
+        return jsonify({'error': 'thumbprint must be a non-empty string'}), 400
+
+    media = device.get('media')
+    if media is not None and not isinstance(media, list):
+        return jsonify({'error': 'media must be a list'}), 400
 
     try:
         devices_path = _device_file(hostname, DEVICE_PREFIX)

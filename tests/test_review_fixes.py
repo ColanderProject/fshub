@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from conftest import write_snapshot
+from conftest import select_all_files, wait_for_task, write_snapshot
 
 from fshub.api.explorer import get_filtered_files, load_snapshot_file, loaded_snapshots
 from fshub.utils import snapshot_relative_path
@@ -234,3 +234,148 @@ def test_device_dedup_prefers_the_last_line_of_a_file(client, config):
     devices_list = client.get('/api/v1/devices').get_json()['devices']
     assert len(devices_list) == 1
     assert devices_list[0]['device_type'] == 'second'
+
+
+# --- second review round -------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason="'\\' is a separator on Windows")
+def test_backslash_name_survives_scan_to_backup(client, config, tmp_path):
+    """End to end: POSIX names containing '\\' must not be rewritten.
+
+    join_snapshot_path used to run base_path.replace('\\\\', '/') and
+    component.lstrip('\\\\/') for Linux snapshots, so a directory named
+    'a\\b' collided with a real 'a/b', and a file named '\\odd.txt' lost its
+    leading character. Both then reached the backup and hashing layers.
+    """
+    import zipfile
+
+    from fshub.scanning import run_scan_to_snapshot
+
+    tree = tmp_path / 'tree'
+    # A genuine nested directory ...
+    (tree / 'a' / 'b').mkdir(parents=True)
+    (tree / 'a' / 'b' / 'inner.txt').write_bytes(b'real-nested')
+    # ... and a single directory whose name happens to contain a backslash.
+    (tree / 'a\\b').mkdir()
+    (tree / 'a\\b' / 'inner.txt').write_bytes(b'odd-dir')
+    # A file whose name starts with a backslash.
+    (tree / '\\odd.txt').write_bytes(b'leading-backslash')
+
+    snapshot = run_scan_to_snapshot(str(tree))['result_file']
+    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+
+    paths = {f['full_path'] for f in get_filtered_files(snapshot, [], [])}
+    assert str(tree / 'a' / 'b' / 'inner.txt') in paths
+    assert str(tree / 'a\\b' / 'inner.txt') in paths
+    assert str(tree / '\\odd.txt') in paths
+    assert len(paths) == 3
+
+    for path in paths:
+        client.post(f'/api/v1/group/{snapshot}/add_file',
+                    json={'path': path, 'group_name': 'all'})
+
+    target = tmp_path / 'zips'
+    response = client.post('/api/v1/backup/zip', json={
+        'snapshot_filename': snapshot,
+        'target_path': str(target),
+        'filter_in': ['all'],
+    })
+    wait_for_task(client, response.get_json()['task_id'])
+
+    contents = {}
+    for archive in target.glob('*.zip'):
+        with zipfile.ZipFile(archive) as zf:
+            for name in zf.namelist():
+                contents[name] = zf.read(name)
+
+    # Three distinct archive members, none overwriting another.
+    assert len(contents) == 3
+    assert sorted(contents.values()) == [b'leading-backslash', b'odd-dir', b'real-nested']
+
+
+def test_hashing_reads_a_backslash_name(client, config, tmp_path):
+    """The corrupted path also made hashing target the wrong file."""
+    from fshub.scanning import run_scan_to_snapshot
+
+    tree = tmp_path / 'tree'
+    (tree / 'a\\b').mkdir(parents=True)
+    (tree / 'a\\b' / 'inner.txt').write_bytes(b'odd-dir')
+
+    snapshot = run_scan_to_snapshot(str(tree))['result_file']
+    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+
+    data = client.post('/api/v1/hash/calculate',
+                       json={'snapshot_filename': snapshot}).get_json()
+    assert data['files_processed'] == 1
+    assert data['files_failed'] == 0
+
+
+def test_second_zip_backup_does_not_destroy_the_first(client, scanned_snapshot,
+                                                      sample_tree, tmp_path):
+    """Both runs write into one directory; neither may clobber the other."""
+    import zipfile
+
+    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    select_all_files(client, scanned_snapshot, sample_tree)
+
+    target = tmp_path / 'zips'
+    archives_per_run = []
+
+    for run in ('first', 'second'):
+        response = client.post('/api/v1/backup/zip', json={
+            'snapshot_filename': scanned_snapshot,
+            'target_path': str(target),
+            'filter_in': ['all'],
+            'backup_name': run,
+        })
+        assert response.status_code == 200
+        status = wait_for_task(client, response.get_json()['task_id'])
+        assert status['status'] == 'completed'
+        archives_per_run.append(sorted(p.name for p in target.glob('*.zip')))
+
+    # The second run added archives instead of replacing the first run's.
+    assert set(archives_per_run[0]) < set(archives_per_run[1])
+    assert any(name.startswith('first_') for name in archives_per_run[1])
+    assert any(name.startswith('second_') for name in archives_per_run[1])
+
+    for archive in target.glob('*.zip'):
+        with zipfile.ZipFile(archive) as zf:
+            assert len(zf.namelist()) == 3
+
+
+def test_device_rejects_unhashable_thumbprint(client):
+    """A list thumbprint used to poison every later GET with a TypeError."""
+    info = client.get('/api/v1/devices').get_json()['current_device_info']
+
+    for bad in ([], {}, 0, ''):
+        response = client.post('/api/v1/devices',
+                               json=dict(info, host_name='ok', thumbprint=bad))
+        assert response.status_code == 400, bad
+
+    # The endpoint is still usable, and nothing was persisted.
+    assert client.get('/api/v1/devices').get_json()['devices'] == []
+
+
+def test_device_listing_survives_a_poisoned_record(client, config):
+    """A record written by an older build must not break the endpoint."""
+    import json as _json
+
+    path = os.path.join(config.devices_dir, 'devices_host.jl')
+    with open(path, 'w', encoding='utf-8') as f:
+        # Unusable thumbprint: falls back to host_name rather than being lost.
+        f.write(_json.dumps({'host_name': 'host', 'thumbprint': []}) + '\n')
+        f.write(_json.dumps({'host_name': 'good', 'thumbprint': 'abc'}) + '\n')
+        # No usable identity at all: dropped instead of raising.
+        f.write(_json.dumps({'host_name': [], 'thumbprint': {}}) + '\n')
+
+    response = client.get('/api/v1/devices')
+    assert response.status_code == 200
+    assert sorted(d['host_name'] for d in response.get_json()['devices']) == ['good', 'host']
+
+
+def test_device_rejects_bad_host_name_and_media(client):
+    assert client.post('/api/v1/devices', json={'host_name': 123}).status_code == 400
+    assert client.post('/api/v1/devices', json={'host_name': ''}).status_code == 400
+    assert client.post('/api/v1/devices',
+                       json={'host_name': 'ok', 'media': 'nope'}).status_code == 400
