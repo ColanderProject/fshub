@@ -1,8 +1,9 @@
 """Search API endpoints"""
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 
 from ..utils import join_snapshot_path
+from . import json_body
 from .explorer import loaded_snapshots, snapshots_lock, to_web_path
 
 search_bp = Blueprint('search_bp', __name__)
@@ -32,18 +33,24 @@ def _matches(name, mode, term):
 @search_bp.route('/api/v1/search', methods=['POST'])
 def search_files():
     """Search for files/folders by name across the requested snapshots"""
-    data = request.get_json(silent=True) or {}
-    query = data.get('query', '').lower()
+    data = json_body()
+    query = data.get('query', '')
     snapshot_files = data.get('snapshots', [])
+
+    if not isinstance(query, str) or not query:
+        return jsonify({'error': 'Query is required'}), 400
+
+    if not isinstance(snapshot_files, list) or not all(
+            isinstance(name, str) for name in snapshot_files):
+        return jsonify({'error': 'snapshots must be a list of strings'}), 400
+
+    query = query.lower()
 
     try:
         limit = int(data.get('limit', DEFAULT_LIMIT))
     except (TypeError, ValueError):
         return jsonify({'error': 'limit must be an integer'}), 400
     limit = max(1, min(limit, MAX_LIMIT))
-
-    if not query:
-        return jsonify({'error': 'Query is required'}), 400
 
     # If no specific snapshots provided, search all loaded snapshots.
     # Grab the entries themselves under the lock: a concurrent

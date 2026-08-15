@@ -7,10 +7,11 @@ import traceback
 import uuid
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 
 from ..config import get_config
 from ..scanning import is_related_path, run_scan_to_snapshot
+from . import json_body
 from .explorer import list_snapshot_files
 
 scan_bp = Blueprint('scan_bp', __name__)
@@ -40,13 +41,17 @@ def _prune_finished_scans():
 @scan_bp.route('/api/v1/scan', methods=['POST'])
 def start_scan():
     """Start a scan of a directory"""
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     scan_path = data.get('path', '')
     skip_paths = data.get('skip_paths', []) or []
     use_index = bool(data.get('use_index', False))
 
-    if not isinstance(skip_paths, list):
-        return jsonify({'error': 'skip_paths must be a list'}), 400
+    if not isinstance(skip_paths, list) or not all(
+            isinstance(path, str) and path for path in skip_paths):
+        return jsonify({'error': 'skip_paths must be a list of non-empty strings'}), 400
+
+    if not isinstance(scan_path, str):
+        return jsonify({'error': 'Invalid path'}), 400
 
     # On Windows "/" means "This PC", i.e. scan every drive.
     is_windows_root = platform.system() == 'Windows' and scan_path == '/'

@@ -9,10 +9,16 @@ import traceback
 import uuid
 import zipfile
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 
 from ..config import get_config
-from ..utils import UnsafePathError, ensure_within, sanitize_name, snapshot_relative_path
+from ..utils import (
+    UnsafePathError,
+    encode_name_component,
+    ensure_within,
+    snapshot_relative_path,
+)
+from . import json_body
 from .explorer import get_filtered_files, get_snapshot_os, loaded_snapshots
 
 backup_bp = Blueprint('backup_bp', __name__)
@@ -21,7 +27,9 @@ backup_bp = Blueprint('backup_bp', __name__)
 backup_tasks = {}
 backup_lock = threading.Lock()
 
+FINISHED = ('completed', 'completed_with_errors', 'error', 'cancelled')
 MAX_FINISHED_TASKS = 50
+MAX_REPORTED_ERRORS = 20
 DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
 COPY_BUFFER = 1024 * 1024
 
@@ -63,7 +71,7 @@ def _prune_finished_tasks():
     finished = [
         (info['start_time'], task_id)
         for task_id, info in backup_tasks.items()
-        if info['status'] in ('completed', 'error', 'cancelled')
+        if info['status'] in FINISHED
     ]
     if len(finished) <= MAX_FINISHED_TASKS:
         return
@@ -94,11 +102,61 @@ def _create_task(total_files):
             'progress': 0,
             'total_files': total_files,
             'completed_files': 0,
+            'failed_files': 0,
             'current_file': None,
             'start_time': time.time(),
             'error': None,
+            'errors': [],
         }
     return task_id
+
+
+def _begin_task(task_id):
+    """Move a task to 'running', unless it was stopped before we got here.
+
+    Compare-and-set: overwriting 'stopped' with 'running' would silently
+    discard a stop request that arrived while the thread was starting.
+    """
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None or task['status'] != 'started':
+            return False
+        task['status'] = 'running'
+        return True
+
+
+def _record(task_id, log, src, dest, size, error=None):
+    """Log one file and update the task counters (error=None means success)."""
+    log.record(src, dest, size, 'failed' if error else 'backup',
+               str(error) if error else 'success')
+
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return
+        if error:
+            task['failed_files'] += 1
+            if len(task['errors']) < MAX_REPORTED_ERRORS:
+                task['errors'].append({'path': src, 'error': str(error)})
+        else:
+            task['completed_files'] += 1
+        done = task['completed_files'] + task['failed_files']
+        task['progress'] = int(done / task['total_files'] * 100) if task['total_files'] else 100
+        task['current_file'] = src
+
+
+def _finish_task(task_id):
+    """Close a task. A run that lost files must never report plain success."""
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return
+        failed = task['failed_files']
+        task['status'] = 'completed_with_errors' if failed else 'completed'
+        task['progress'] = 100
+        task['current_file'] = None
+        if failed:
+            task['error'] = f"{failed} of {task['total_files']} files failed"
 
 
 def _open_log(backup_target_name, backup_name, file_count, meta):
@@ -113,8 +171,10 @@ def _open_log(backup_target_name, backup_name, file_count, meta):
     os.makedirs(log_dir, exist_ok=True)
 
     timestamp = int(time.time())
-    target = sanitize_name(backup_target_name, what='backup_target_name')
-    name = sanitize_name(backup_name, what='backup_name')
+    # Encoded, not rejected: "My Backup" is a perfectly normal label and the
+    # original text is kept verbatim in the log metadata.
+    target = encode_name_component(backup_target_name, what='backup_target_name')
+    name = encode_name_component(backup_name, what='backup_name')
     run_id = f'{name}_{timestamp}_{uuid.uuid4().hex[:8]}'
     log_path = os.path.join(log_dir, f'{target}_{run_id}_{file_count}.jl')
 
@@ -138,6 +198,11 @@ def _prepare_backup(data, backup_type):
 
     if not os.path.isabs(target_path):
         return None, ({'error': 'target_path must be an absolute path'}, 400)
+
+    # Both backup types write *into* the target, so an existing file there is
+    # a user error worth reporting before a task is started.
+    if os.path.exists(target_path) and not os.path.isdir(target_path):
+        return None, ({'error': 'target_path must be a directory'}, 400)
 
     filter_in = data.get('filter_in', [])
     filter_out = data.get('filter_out', [])
@@ -168,7 +233,7 @@ def _prepare_backup(data, backup_type):
 @backup_bp.route('/api/v1/backup/zip', methods=['POST'])
 def create_zip_backup():
     """Create a zip backup with filtered files"""
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     ctx, error = _prepare_backup(data, 'zip')
     if error:
         payload, status = error
@@ -220,7 +285,7 @@ def create_zip_backup():
 @backup_bp.route('/api/v1/backup/folder', methods=['POST'])
 def create_folder_backup():
     """Create a folder backup with filtered files"""
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     ctx, error = _prepare_backup(data, 'folder')
     if error:
         payload, status = error
@@ -274,7 +339,7 @@ def stop_backup_task(task_id):
         task = backup_tasks.get(task_id)
         if task is None:
             return jsonify({'error': 'Task not found'}), 404
-        if task['status'] in ('completed', 'error', 'cancelled'):
+        if task['status'] in FINISHED:
             return jsonify({'success': False, 'message': f"Task already {task['status']}"})
         task['status'] = 'stopped'
 
@@ -285,8 +350,11 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                        max_file_size, log, snapshot_os, run_id):
     """Perform the actual zip backup in a separate thread"""
     try:
+        if not _begin_task(task_id):
+            _update_task(task_id, status='cancelled')
+            return
+
         os.makedirs(target_path, exist_ok=True)
-        _update_task(task_id, status='running')
 
         total = len(files_to_backup)
         files_processed = 0
@@ -307,9 +375,16 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                         _update_task(task_id, status='cancelled')
                         return
 
-                    file_info = files_to_backup[files_processed]
-                    file_size = file_info.get('size', 0) or 0
-                    source_path = file_info['full_path']
+                    source_path = files_to_backup[files_processed]['full_path']
+
+                    # The size on disk, not the snapshot's stale copy: the
+                    # split limit has to match what is actually archived.
+                    try:
+                        file_size = os.path.getsize(source_path)
+                    except OSError as e:
+                        _record(task_id, log, source_path, zip_filename, 0, e)
+                        files_processed += 1
+                        continue
 
                     # Start a new archive rather than blowing past the limit.
                     if chunk_size > 0 and chunk_size + file_size > max_file_size:
@@ -324,25 +399,17 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                             with zipf.open(arcname, 'w') as dst:
                                 shutil.copyfileobj(src, dst, COPY_BUFFER)
                     except OSError as e:
-                        log.record(source_path, zip_filename, file_size, 'failed', str(e))
+                        _record(task_id, log, source_path, zip_filename, file_size, e)
                         files_processed += 1
                         continue
 
-                    log.record(source_path, zip_filename, file_size, 'backup', 'success')
-
+                    _record(task_id, log, source_path, zip_filename, file_size)
                     chunk_size += file_size
                     files_processed += 1
 
-                    _update_task(
-                        task_id,
-                        completed_files=files_processed,
-                        progress=int(files_processed / total * 100),
-                        current_file=source_path,
-                    )
-
             zip_index += 1
 
-        _update_task(task_id, status='completed', progress=100, completed_files=total)
+        _finish_task(task_id)
 
     except Exception as e:  # noqa: BLE001 - reported through the task state
         traceback.print_exc()
@@ -354,12 +421,13 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
 def perform_folder_backup(task_id, files_to_backup, target_path, log, snapshot_os):
     """Perform the actual folder backup in a separate thread"""
     try:
+        if not _begin_task(task_id):
+            _update_task(task_id, status='cancelled')
+            return
+
         os.makedirs(target_path, exist_ok=True)
-        _update_task(task_id, status='running')
 
-        total = len(files_to_backup)
-
-        for i, file_info in enumerate(files_to_backup):
+        for file_info in files_to_backup:
             if _task_status(task_id) == 'stopped':
                 _update_task(task_id, status='cancelled')
                 return
@@ -367,32 +435,29 @@ def perform_folder_backup(task_id, files_to_backup, target_path, log, snapshot_o
             source_path = file_info['full_path']
             size = file_info.get('size', 0) or 0
 
-            _update_task(
-                task_id,
-                completed_files=i + 1,
-                progress=int((i + 1) / total * 100),
-                current_file=source_path,
-            )
-
             relative_path = snapshot_relative_path(source_path, snapshot_os)
             dest_full_path = os.path.join(target_path, *relative_path.split('/'))
+            dest_dir = os.path.dirname(dest_full_path)
 
             try:
-                os.makedirs(os.path.dirname(dest_full_path), exist_ok=True)
-                # Validate the *complete* destination after the parents exist:
-                # a pre-existing symlink there would otherwise let copy2 write
-                # straight through it to a file outside the target.
+                # Check the parent *before* creating it: a symlinked component
+                # already in the target would otherwise let makedirs() build a
+                # directory tree outside of it. The complete path is checked
+                # again afterwards so a pre-existing symlink there cannot make
+                # copy2 write straight through it either.
+                ensure_within(target_path, dest_dir, what='destination')
+                os.makedirs(dest_dir, exist_ok=True)
                 ensure_within(target_path, dest_full_path, what='destination')
                 if os.path.islink(dest_full_path):
                     raise UnsafePathError(f'Destination is a symlink: {dest_full_path}')
                 shutil.copy2(source_path, dest_full_path)
             except (OSError, UnsafePathError) as e:
-                log.record(source_path, dest_full_path, size, 'failed', str(e))
+                _record(task_id, log, source_path, dest_full_path, size, e)
                 continue
 
-            log.record(source_path, dest_full_path, size, 'backup', 'success')
+            _record(task_id, log, source_path, dest_full_path, size)
 
-        _update_task(task_id, status='completed', progress=100, completed_files=total)
+        _finish_task(task_id)
 
     except Exception as e:  # noqa: BLE001 - reported through the task state
         traceback.print_exc()

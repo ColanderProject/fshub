@@ -5,10 +5,11 @@ import os
 import threading
 import time
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 
 from ..config import get_config
 from ..utils import UnsafePathError, encode_name_component, get_system_info, safe_join
+from . import json_body
 
 device_bp = Blueprint('device_bp', __name__)
 
@@ -37,20 +38,33 @@ def _next_stamp():
         return now
 
 
+def _legacy_file(hostname, prefix):
+    """The pre-encoding file name, or None when it never could have been one."""
+    if hostname in ('.', '..') or any(sep and sep in hostname
+                                      for sep in (os.sep, os.altsep)):
+        return None
+    return os.path.join(get_config().devices_dir, f'{prefix}{hostname}{DEVICE_SUFFIX}')
+
+
 def _device_file(hostname, prefix):
     """Resolve a per-host data file, refusing anything that escapes the dir.
 
     The host name is percent-encoded rather than rejected: names such as
     "Ann's MacBook Pro" or "办公室-PC" are perfectly normal and must stay
     registrable. Plain ASCII names encode to themselves, so files written by
-    earlier versions keep being found.
+    earlier versions keep being found; the ones that do not are migrated to
+    the encoded name on first use.
     """
     encoded = encode_name_component(hostname, what='host name')
-    return safe_join(
-        get_config().devices_dir,
-        f'{prefix}{encoded}{DEVICE_SUFFIX}',
-        what='host name',
-    )
+    path = safe_join(get_config().devices_dir,
+                     f'{prefix}{encoded}{DEVICE_SUFFIX}', what='host name')
+
+    if encoded != hostname and not os.path.exists(path):
+        legacy = _legacy_file(hostname, prefix)
+        if legacy and os.path.exists(legacy):
+            os.replace(legacy, path)
+
+    return path
 
 
 def _read_jl(path):
@@ -72,7 +86,8 @@ def _load_all_devices():
 
     The ordering key is (updated_at, file mtime, line number) so that records
     written before updated_at existed still fall back to something sensible
-    rather than to file name order.
+    rather than to file name order. Records that are not objects, or whose
+    updated_at is not a number, must not break the whole endpoint.
     """
     devices_dir = get_config().devices_dir
     try:
@@ -90,7 +105,12 @@ def _load_all_devices():
         except OSError:
             mtime = 0
         for line_no, device in enumerate(_read_jl(path)):
-            all_devices.append(((device.get('updated_at', 0), mtime, line_no), device))
+            if not isinstance(device, dict):
+                continue
+            updated_at = device.get('updated_at', 0)
+            if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+                updated_at = 0
+            all_devices.append(((updated_at, mtime, line_no), device))
     return all_devices
 
 
@@ -133,10 +153,7 @@ def get_devices():
 @device_bp.route('/api/v1/devices', methods=['POST'])
 def add_device():
     """Add or update a device"""
-    device = request.get_json(silent=True) or {}
-
-    if not isinstance(device, dict):
-        return jsonify({'error': 'Device must be a JSON object'}), 400
+    device = json_body()
 
     hostname = device.get('host_name')
     if not isinstance(hostname, str) or not hostname:

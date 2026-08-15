@@ -118,7 +118,9 @@ Group membership is stored as an append-only action log next to the snapshot
 `[path, "f"|"d", group_name, "add"|"del", timestamp]`. It is replayed into
 `{group: {'f': set(), 'd': set()}}` on load. The log write and the in-memory
 update happen together under `snapshots_lock`, log first, so concurrent
-requests cannot persist in a different order than they were applied.
+requests cannot persist in a different order than they were applied. Paths
+arrive from the UI in web form and are converted with `from_web_path` before
+they are stored, so a group entry always matches the snapshot index.
 
 Filtering semantics (`explorer.filter_on_snapshot`):
 
@@ -126,6 +128,10 @@ Filtering semantics (`explorer.filter_on_snapshot`):
 - `filter_in` on a **directory** selects that whole subtree.
 - `filter_in` on a **file** selects just that file; ancestors are kept
   traversable via `dirinFilterSet` so deep selections are still reachable.
+  `dirinFilterSet` is only built for backup/hash selection
+  (`get_filtered_files`); filtered *browsing* (`filter_path_content`) shows a
+  directory only when it is itself in `filter_in`, so a browsed listing can
+  hide an ancestor whose children a backup with the same filter still copies.
 
 ## Concurrency
 
@@ -138,6 +144,12 @@ Flask serves requests from multiple threads. Shared mutable state is guarded:
 Both scan and backup task registries prune finished entries so they cannot
 grow without bound. Worker threads catch exceptions and report them through
 the task's `status`/`error` fields — never leave a task stuck in `running`.
+
+A backup worker only moves `started` → `running` when the task is still
+`started` (compare-and-set), so a stop request that arrives before the thread
+is scheduled is not overwritten. Per-file results are counted separately:
+`completed_files` are copies that succeeded, `failed_files`/`errors` the ones
+that did not, and a run with any failure finishes as `completed_with_errors`.
 
 ## Testing
 

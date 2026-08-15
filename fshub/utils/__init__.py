@@ -45,10 +45,12 @@ def encode_name_component(value, what='name'):
 
     # '.'/'..' are valid host names but not valid file names, and an overly
     # long name would fail at open() time; both fall back to a deterministic
-    # digest so the record still has a stable home.
+    # digest. The '%-' marker cannot appear in normal output (a '%' is only
+    # ever emitted as part of a '%XX' escape), so a fallback name can never
+    # collide with an ordinary one.
     if encoded in ('.', '..') or len(encoded) > MAX_NAME_LENGTH:
         digest = hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
-        encoded = encoded[: MAX_NAME_LENGTH - len(digest) - 1] + '-' + digest
+        encoded = encoded[: MAX_NAME_LENGTH - len(digest) - 2] + '%-' + digest
 
     return encoded
 
@@ -70,19 +72,17 @@ def safe_join(base_dir, *names, what='name'):
     """Join validated name components onto base_dir, refusing to escape it."""
     for name in names:
         sanitize_name(name, what=what)
-
-    base_real = os.path.realpath(base_dir)
-    candidate = os.path.realpath(os.path.join(base_real, *names))
-    if candidate != base_real and not candidate.startswith(base_real + os.sep):
-        raise UnsafePathError(f'Invalid {what}: path escapes {base_dir}')
-    return candidate
+    return ensure_within(base_dir, os.path.join(base_dir, *names), what=what)
 
 
 def ensure_within(base_dir, target_path, what='path'):
     """Return the realpath of target_path, ensuring it stays under base_dir."""
     base_real = os.path.realpath(base_dir)
     candidate = os.path.realpath(target_path)
-    if candidate != base_real and not candidate.startswith(base_real + os.sep):
+
+    # rstrip so a filesystem root stays usable as a base: '/' + os.sep would
+    # be '//' and 'E:\\' + os.sep would be 'E:\\\\', matching nothing.
+    if candidate != base_real and not candidate.startswith(base_real.rstrip(os.sep) + os.sep):
         raise UnsafePathError(f'Invalid {what}: path escapes {base_dir}')
     return candidate
 

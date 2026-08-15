@@ -168,7 +168,7 @@ def test_windows_root_scan_is_related_to_every_drive(monkeypatch):
 
     # Identity normalisation mimics ntpath: without the '/' special case the
     # comparison below is a plain string test that finds nothing in common.
-    monkeypatch.setattr(scanning, '_normalize_prefix', lambda p: p)
+    monkeypatch.setattr(scanning, '_canonical_path', lambda p: p)
 
     monkeypatch.setattr(scanning.platform, 'system', lambda: 'Linux')
     assert scanning.is_related_path('/', 'D:\\data') is False

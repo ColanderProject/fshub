@@ -10,12 +10,11 @@ from flask import Flask, render_template, jsonify
 from .config import get_config
 
 
-def create_app(config=None):
+def create_app():
+    """Build the WSGI application. Usable directly by e.g. gunicorn."""
     app = Flask(__name__)
 
-    config = config or get_config()
-    config.ensure_dirs()
-    app.config['FSHUB_CONFIG'] = config
+    get_config().ensure_dirs()
 
     @app.route('/')
     def index():
@@ -42,11 +41,12 @@ def create_app(config=None):
     app.register_blueprint(explorer_bp)
     app.register_blueprint(hash_bp)
 
-    return app, config
+    return app
 
 
 def start_web_server(host=None, port=None):
-    app, config = create_app()
+    app = create_app()
+    config = get_config()
 
     # Use provided host/port or config defaults
     host = host or config.listen_ip

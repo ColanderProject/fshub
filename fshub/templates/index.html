@@ -375,8 +375,8 @@
                 <div class="mb-3">
                     <h4>Backup to ZIP</h4>
                     <div class="mb-3">
-                        <label for="backup-zip-path" class="form-label">Target ZIP file or folder:</label>
-                        <input type="text" class="form-control" id="backup-zip-path" placeholder="/path/to/backup.zip or /path/to/folder/">
+                        <label for="backup-zip-path" class="form-label">Target folder for the ZIP volumes:</label>
+                        <input type="text" class="form-control" id="backup-zip-path" placeholder="/path/to/folder/">
                     </div>
                     <div class="row mb-3">
                         <div class="col-md-6">
@@ -600,6 +600,17 @@
             el.textContent = data.current_device_known
                 ? (data.current_device_info?.device_name || '')
                 : 'Unregistered device';
+        }
+
+        // Replace an element's content with a plain-text error message.
+        // textContent, so an error echoing user input cannot inject markup.
+        function showError(elementId, message) {
+            const el = document.getElementById(elementId);
+            el.textContent = '';
+            const p = document.createElement('p');
+            p.className = 'text-danger';
+            p.textContent = message;
+            el.appendChild(p);
         }
 
         // Load available snapshots
@@ -1274,7 +1285,7 @@
                 // Check if there's an error in the response
                 if (!response.ok || data.error) {
                     const errorMessage = data.error || 'Unknown error occurred';
-                    document.getElementById('search-results-content').innerHTML = `<p class="text-danger">Error: ${errorMessage}</p>`;
+                    showError('search-results-content', `Error: ${errorMessage}`);
                     return;
                 }
 
@@ -1343,7 +1354,7 @@
                 resultsDiv.appendChild(table);
             } catch (error) {
                 console.error('Search failed:', error);
-                document.getElementById('search-results-content').innerHTML = '<p class="text-danger">Search failed: ' + error.message + '</p>';
+                showError('search-results-content', `Search failed: ${error.message}`);
             }
         }
         
@@ -1693,7 +1704,8 @@
 
                         // Update progress text
                         document.getElementById('backup-progress-text').textContent =
-                            `${data.completed_files}/${data.total_files}`;
+                            `${data.completed_files}/${data.total_files}` +
+                            (data.failed_files ? ` (${data.failed_files} failed)` : '');
 
                         // Update status
                         document.getElementById('backup-status').textContent = data.status;
@@ -1703,12 +1715,17 @@
                             document.getElementById('current-file').textContent = data.current_file;
                         }
 
-                        // If the task is completed, stop monitoring
-                        if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
+                        // If the task is finished, stop monitoring
+                        if (['completed', 'completed_with_errors', 'error', 'cancelled'].includes(data.status)) {
                             clearInterval(backupInterval);
 
                             if (data.status === 'completed') {
                                 alert(`Backup completed successfully! ${data.completed_files} files backed up.`);
+                            } else if (data.status === 'completed_with_errors') {
+                                alert(`Backup finished with errors: ${data.completed_files} of ` +
+                                      `${data.total_files} files backed up, ${data.failed_files} failed.\n\n` +
+                                      (data.errors || []).slice(0, 5)
+                                          .map(e => `${e.path}: ${e.error}`).join('\n'));
                             } else if (data.status === 'error') {
                                 alert(`Backup failed: ${data.error}`);
                             } else if (data.status === 'cancelled') {
@@ -1864,36 +1881,35 @@
             allGroups.forEach(group => {
                 const li = document.createElement('li');
                 li.className = 'list-group-item d-flex justify-content-between align-items-center';
-                li.innerHTML = `
-                    <div>
-                        <strong>${group.name}</strong><br>
-                        <small class="text-muted">Files: ${group.file_count} | Directories: ${group.dir_count} | Total: ${group.total_count}</small>
-                    </div>
-                    <div>
-                        <button class="btn btn-sm btn-outline-primary me-1 view-group-btn" data-group="${group.name}">View</button>
-                        <button class="btn btn-sm btn-outline-secondary me-1 add-default-btn" data-group="${group.name}">Add as Default</button>
-                        <button class="btn btn-sm btn-outline-danger remove-group-btn" data-group="${group.name}">Remove</button>
-                    </div>
-                `;
 
-                // Add event listener to view group button
-                const viewBtn = li.querySelector('.view-group-btn');
-                viewBtn.addEventListener('click', function() {
-                    viewGroup(currentSnapshot, group.name);
+                // textContent, never innerHTML: a group name is user data and
+                // would otherwise execute as HTML in every operator's browser.
+                const info = document.createElement('div');
+                const name = document.createElement('strong');
+                name.textContent = group.name;
+                const counts = document.createElement('small');
+                counts.className = 'text-muted';
+                counts.textContent = `Files: ${group.file_count} | Directories: ${group.dir_count} | Total: ${group.total_count}`;
+                info.appendChild(name);
+                info.appendChild(document.createElement('br'));
+                info.appendChild(counts);
+
+                const actions = document.createElement('div');
+                const buttons = [
+                    ['View', 'btn-outline-primary me-1', () => viewGroup(currentSnapshot, group.name)],
+                    ['Add as Default', 'btn-outline-secondary me-1', () => addGroupAsDefault(group.name)],
+                    ['Remove', 'btn-outline-danger', () => removeGroup(currentSnapshot, group.name)],
+                ];
+                buttons.forEach(([label, className, handler]) => {
+                    const button = document.createElement('button');
+                    button.className = `btn btn-sm ${className}`;
+                    button.textContent = label;
+                    button.addEventListener('click', handler);
+                    actions.appendChild(button);
                 });
 
-                // Add event listener to add as default button
-                const addDefaultBtn = li.querySelector('.add-default-btn');
-                addDefaultBtn.addEventListener('click', function() {
-                    addGroupAsDefault(group.name);
-                });
-
-                // Add event listener to remove group button
-                const removeBtn = li.querySelector('.remove-group-btn');
-                removeBtn.addEventListener('click', function() {
-                    removeGroup(currentSnapshot, group.name);
-                });
-
+                li.appendChild(info);
+                li.appendChild(actions);
                 ul.appendChild(li);
             });
 
@@ -1938,7 +1954,7 @@
                     <div class="modal-dialog modal-xl">
                         <div class="modal-content">
                             <div class="modal-header">
-                                <h5 class="modal-title">Group: ${group}</h5>
+                                <h5 class="modal-title" id="groupModalTitle"></h5>
                                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                             </div>
                             <div class="modal-body">
@@ -2001,6 +2017,8 @@
 
             // Show the modal
             const modalElement = document.getElementById('groupModal');
+            // textContent so a group name cannot inject markup into the modal.
+            document.getElementById('groupModalTitle').textContent = `Group: ${group}`;
             const modal = new bootstrap.Modal(modalElement);
             modal.show();
 

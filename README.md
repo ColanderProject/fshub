@@ -30,6 +30,13 @@ fshub config gen
 fshub scan /home/me --skip-path /home/me/.cache
 ```
 
+`fshub web` is the localhost convenience runner. For a long running
+deployment use any WSGI server:
+
+```bash
+gunicorn -b 127.0.0.1:7303 'fshub.web:create_app()'
+```
+
 ## Configuration
 
 The configuration file is read from `fshub.yaml` in the current directory, or
@@ -76,15 +83,18 @@ Everything lives under `data_path`:
 
 ```
 ~/.fshub/
-├── snapshots/   # snapshot_<ts>_<count>.jsonl.gz and their *_groups.jl logs
+├── snapshots/   # snapshot_<ts>_<count>_<uuid>.jsonl.gz and their *_groups.jl logs
 ├── devices/     # devices_<host>.jl, media_<host>.jl
 └── backups/     # one JSONL log per backup run
 ```
 
-Zip backups write `<backup_name>_<timestamp>_<uuid>_NNN.zip` into the target
-directory, and archives are opened with mode `x`, so running a backup twice
-into the same directory adds a new set rather than overwriting the previous
-one — even for two runs started within the same second.
+Both backup types write *into* a target directory. Zip backups produce
+`<backup_name>_<timestamp>_<uuid>_NNN.zip`, and archives are opened with mode
+`x`, so running a backup twice into the same directory adds a new set rather
+than overwriting the previous one — even for two runs started within the same
+second. A run that could not copy every selected file finishes as
+`completed_with_errors` and reports `failed_files`/`errors`; it never claims
+success.
 
 ## Development
 

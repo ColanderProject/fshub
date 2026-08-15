@@ -19,6 +19,27 @@ DEFAULTS = {
 }
 
 
+def _clean_text(value):
+    """A non-empty string, or None when the value is unusable."""
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _clean_path(value):
+    text = _clean_text(value)
+    return os.path.expanduser(text) if text else None
+
+
+def _clean_port(value):
+    """A port in the TCP range, or None. bool is an int but not a port."""
+    if isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 class Config:
     def __init__(self, config_path=None):
         self.data_path = os.path.expanduser(DEFAULTS['data_path'])
@@ -56,17 +77,19 @@ class Config:
         if not isinstance(config_data, dict):
             return
 
-        self.data_path = os.path.expanduser(config_data.get('data_path', self.data_path))
-        self.listen_ip = config_data.get('listen_ip', self.listen_ip)
-
-        # A malformed port must not take the whole process down: every other
-        # problem in this file is reported and then ignored.
-        listen_port = config_data.get('listen_port', self.listen_port)
-        try:
-            self.listen_port = int(listen_port)
-        except (TypeError, ValueError):
-            print(f"Invalid listen_port {listen_port!r} in {config_path}, "
-                  f"using {self.listen_port}")
+        # Every unusable value is reported and then ignored: a typo in the
+        # config file must not take the whole process down.
+        for key, clean in (('data_path', _clean_path),
+                           ('listen_ip', _clean_text),
+                           ('listen_port', _clean_port)):
+            if key not in config_data:
+                continue
+            value = clean(config_data[key])
+            if value is None:
+                print(f"Invalid {key} {config_data[key]!r} in {config_path}, "
+                      f"using {getattr(self, key)!r}")
+            else:
+                setattr(self, key, value)
 
     # -- derived paths ---------------------------------------------------
 

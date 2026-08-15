@@ -5,6 +5,7 @@ import json
 import os
 import threading
 from datetime import datetime
+from itertools import zip_longest
 
 from flask import Blueprint, request, jsonify
 
@@ -16,6 +17,7 @@ from ..utils import (
     safe_join,
     snapshot_dirname,
 )
+from . import json_body
 
 explorer_bp = Blueprint('explorer_bp', __name__)
 
@@ -25,6 +27,9 @@ loaded_snapshots = {}
 
 # Guards mutation of loaded_snapshots (Flask serves requests from many threads).
 snapshots_lock = threading.RLock()
+
+# Stand-in for a snapshot that was unloaded while a request was reading it.
+EMPTY_SNAPSHOT = {'data': [], 'index': {}, 'groups': {}}
 
 SNAPSHOT_PREFIX = 'snapshot_'
 SNAPSHOT_SUFFIX = '.jsonl.gz'
@@ -98,7 +103,7 @@ def from_web_path(path, snapshot_os):
 @explorer_bp.route('/api/v1/load_snapshot', methods=['POST'])
 def load_snapshot():
     """Load a snapshot file into memory"""
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     snapshot_filename = data.get('filename', '')
 
     if not snapshot_filename:
@@ -108,6 +113,10 @@ def load_snapshot():
         success = load_snapshot_file(snapshot_filename)
     except UnsafePathError as e:
         return jsonify({'error': str(e)}), 400
+    except (OSError, EOFError, ValueError, KeyError) as e:
+        # Truncated, half-written or foreign files are a normal operator
+        # mistake, not a server fault.
+        return jsonify({'error': f'Invalid snapshot file: {e}'}), 400
 
     if not success:
         return jsonify({'error': f'Failed to load snapshot: {snapshot_filename}'}), 400
@@ -122,7 +131,7 @@ def load_snapshot():
 @explorer_bp.route('/api/v1/unload_snapshot', methods=['POST'])
 def unload_snapshot():
     """Unload a snapshot from memory"""
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     snapshot_filename = data.get('filename', '')
 
     with snapshots_lock:
@@ -160,16 +169,19 @@ def get_path():
     if path is not None and index is not None:
         return jsonify({'error': 'Cannot specify both path and index'}), 400
 
-    if snapshot_filename not in loaded_snapshots:
+    # One lookup, then work on that reference: a concurrent unload must not
+    # turn a read into a KeyError.
+    entry = loaded_snapshots.get(snapshot_filename)
+    if entry is None:
         return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
 
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
+    snapshot_data = entry['data']
     snapshot_os = get_snapshot_os(snapshot_filename)
 
     path_obj = None
     if path is not None:
         lookup_path = from_web_path(path, snapshot_os)
-        path_idx = loaded_snapshots[snapshot_filename]['index'].get(lookup_path)
+        path_idx = entry['index'].get(lookup_path)
         if path_idx is not None:
             path_obj = snapshot_data[path_idx]
     elif index is not None:
@@ -330,9 +342,11 @@ def _read_snapshot_records(snapshot_filename):
     records = []
     with gzip.open(path, 'rt', encoding='utf-8') as index_file, \
             gzip.open(data_path, 'rt', encoding='utf-8') as data_file:
-        for index_line, data_line in zip(index_file, data_file):
-            if not index_line.strip():
-                continue
+        # zip_longest, not zip: a missing tail in either stream must be an
+        # error instead of a snapshot that silently ends early.
+        for index_line, data_line in zip_longest(index_file, data_file):
+            if not index_line or not data_line or not index_line.strip():
+                raise ValueError('index and data files do not match')
             record = json.loads(data_line)
             record['p'] = json.loads(index_line)['p']
             records.append(record)
@@ -365,10 +379,11 @@ def load_snapshot_file(snapshot_filename):
 
 def get_snapshot_info(snapshot_filename):
     """Get information about a loaded snapshot"""
-    if snapshot_filename not in loaded_snapshots:
+    entry = loaded_snapshots.get(snapshot_filename)
+    if entry is None:
         return None
 
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
+    snapshot_data = entry['data']
 
     if not snapshot_data:
         return {
@@ -465,7 +480,7 @@ def _in_any_group(groups_dict, group_names, item_type, item_path):
 
 def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc=False):
     """Filter path content based on groups"""
-    entry = loaded_snapshots[snapshot_filename]
+    entry = loaded_snapshots.get(snapshot_filename) or EMPTY_SNAPSHOT
     groups_dict = entry['groups']
     index = entry['index']
     data = entry['data']
@@ -595,7 +610,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
 
 def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
-    entry = loaded_snapshots[snapshot_filename]
+    entry = loaded_snapshots.get(snapshot_filename) or EMPTY_SNAPSHOT
     return filter_on_snapshot(
         path_obj, entry['data'], entry['index'],
         filter_in, filter_out, entry['groups'], None,

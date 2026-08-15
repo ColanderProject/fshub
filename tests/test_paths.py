@@ -1,6 +1,8 @@
 """Tests for path safety helpers and the endpoints that rely on them."""
 
+import json
 import os
+from urllib.parse import quote
 
 import pytest
 
@@ -145,3 +147,35 @@ def test_device_roundtrip_with_unusual_hostname(client):
 
     media = client.get(f'/api/v1/device/{hostname}/media')
     assert media.get_json() == {'media': [{'name': 'disk0'}]}
+
+
+def test_ensure_within_accepts_children_of_a_root(tmp_path):
+    """'/' + os.sep would be '//' and reject every child of the root."""
+    root = os.path.abspath(os.sep)
+    assert ensure_within(root, os.path.join(root, 'anything')).startswith(root)
+
+    # The same normalisation issue appears with a trailing separator.
+    assert ensure_within(str(tmp_path) + os.sep, tmp_path / 'x') == str(tmp_path / 'x')
+
+
+def test_legacy_device_file_is_migrated(client, config):
+    """Media saved before host names were encoded must stay reachable."""
+    hostname = "Ann's PC"
+    legacy = os.path.join(config.devices_dir, f'media_{hostname}.jl')
+    with open(legacy, 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'name': 'usb'}) + '\n')
+
+    response = client.get(f'/api/v1/device/{quote(hostname)}/media')
+
+    assert response.get_json()['media'] == [{'name': 'usb'}]
+    assert not os.path.exists(legacy)
+    assert os.path.exists(os.path.join(
+        config.devices_dir, f'media_{encode_name_component(hostname)}.jl'))
+
+
+def test_digest_fallback_cannot_collide_with_a_normal_name():
+    """The '%-' marker never appears in ordinary output, so the two namespaces
+    stay disjoint even when a host name imitates a hashed one."""
+    hashed = encode_name_component('z' * 500)
+    assert '%-' in hashed
+    assert encode_name_component(hashed) != hashed

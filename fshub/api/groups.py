@@ -6,7 +6,14 @@ from datetime import datetime
 from flask import Blueprint, request, jsonify
 
 from ..utils import UnsafePathError
-from .explorer import groups_path, loaded_snapshots, snapshots_lock
+from . import json_body
+from .explorer import (
+    from_web_path,
+    get_snapshot_os,
+    groups_path,
+    loaded_snapshots,
+    snapshots_lock,
+)
 
 group_bp = Blueprint('group_bp', __name__)
 
@@ -16,7 +23,7 @@ def _read_group_request(snapshot_filename):
 
     Returns (path, group_name, None) or (None, None, (payload, status)).
     """
-    data = request.get_json(silent=True) or {}
+    data = json_body()
     item_path = data.get('path', '')
     group_name = data.get('group_name', '')
 
@@ -30,6 +37,10 @@ def _read_group_request(snapshot_filename):
 
     if snapshot_filename not in loaded_snapshots:
         return None, None, ({'error': 'Snapshot not loaded'}, 400)
+
+    # The UI navigates in web paths (/C:/Users), the snapshot is indexed by
+    # native ones (C:\Users). Convert here so a group entry always matches.
+    item_path = from_web_path(item_path, get_snapshot_os(snapshot_filename))
 
     return item_path, group_name, None
 
@@ -68,13 +79,13 @@ def _mutate_group(snapshot_filename, item_type, action_type):
 @group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
 def get_groups(snapshot_filename):
     """Get all groups for a specific snapshot with file and directory counts"""
-    if snapshot_filename not in loaded_snapshots:
+    entry = loaded_snapshots.get(snapshot_filename)
+    if entry is None:
         return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    snapshot_groups = loaded_snapshots[snapshot_filename]['groups']
     groups_with_counts = []
 
-    for group_name, items in snapshot_groups.items():
+    for group_name, items in entry['groups'].items():
         file_count = len(items.get('f', set()))
         dir_count = len(items.get('d', set()))
 
@@ -120,10 +131,11 @@ def get_files_in_group(snapshot_filename):
     if not group_name:
         return jsonify({'error': 'Group name is required'}), 400
 
-    if snapshot_filename not in loaded_snapshots:
+    entry = loaded_snapshots.get(snapshot_filename)
+    if entry is None:
         return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    group_data = loaded_snapshots[snapshot_filename]['groups'].get(group_name, {'f': set(), 'd': set()})
+    group_data = entry['groups'].get(group_name, {'f': set(), 'd': set()})
 
     return jsonify({
         'group_name': group_name,

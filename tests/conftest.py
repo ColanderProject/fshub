@@ -31,7 +31,7 @@ def config(tmp_path, monkeypatch):
 
 @pytest.fixture
 def app(config):
-    application, _ = create_app(config)
+    application = create_app()
     application.config['TESTING'] = True
     yield application
     loaded_snapshots.clear()
@@ -90,7 +90,7 @@ def wait_for_task(client, task_id, timeout=4.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = client.get(f'/api/v1/backup/status/{task_id}').get_json()
-        if status['status'] in ('completed', 'error', 'cancelled'):
+        if status['status'] in backup_module.FINISHED:
             return status
         time.sleep(0.02)
     pytest.fail(f'backup task {task_id} did not finish within {timeout}s')

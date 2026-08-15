@@ -64,3 +64,20 @@ def test_derived_paths(tmp_path):
     assert config.snapshot_dir == os.path.join(str(tmp_path / 'd'), 'snapshots')
     assert os.path.isdir(config.devices_dir)
     assert os.path.isdir(config.backup_log_dir)
+
+
+def test_out_of_range_port_falls_back_to_default(tmp_path, capsys):
+    config = Config(write_config(tmp_path, {'listen_port': 70000}))
+
+    assert config.listen_port == 7303
+    assert 'listen_port' in capsys.readouterr().out
+
+
+def test_malformed_values_are_reported_not_raised(tmp_path, capsys):
+    """A wrong type in the config file must not crash the process at startup."""
+    config = Config(write_config(tmp_path, {'data_path': 123, 'listen_ip': []}))
+
+    out = capsys.readouterr().out
+    assert config.data_path == os.path.expanduser('~/.fshub/')
+    assert config.listen_ip == 'localhost'
+    assert 'data_path' in out and 'listen_ip' in out

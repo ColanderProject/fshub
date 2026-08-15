@@ -140,3 +140,25 @@ def test_device_registration_is_deduplicated(client):
     info = client.get('/api/v1/devices').get_json()
     assert len(info['devices']) == 1
     assert info['current_device_known'] is True
+
+
+def test_endpoints_reject_non_object_json(client):
+    """A JSON list or string is a client error, not an AttributeError 500."""
+    for url in ('/api/v1/load_snapshot', '/api/v1/unload_snapshot',
+                '/api/v1/search', '/api/v1/scan',
+                '/api/v1/backup/zip', '/api/v1/backup/folder'):
+        response = client.post(url, json=['not', 'an', 'object'])
+        assert response.status_code == 400, url
+
+
+def test_search_rejects_wrong_types(client):
+    assert client.post('/api/v1/search', json={'query': 42}).status_code == 400
+    assert client.post('/api/v1/search',
+                       json={'query': 'a', 'snapshots': [1]}).status_code == 400
+
+
+def test_scan_rejects_non_string_skip_paths(client, sample_tree):
+    response = client.post('/api/v1/scan', json={'path': str(sample_tree),
+                                                 'skip_paths': [123]})
+    assert response.status_code == 400
+    assert 'skip_paths' in response.get_json()['error']

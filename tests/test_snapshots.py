@@ -122,3 +122,50 @@ def test_filter_out_removes_a_subtree(client, scanned_snapshot, sample_tree):
 
     files = get_filtered_files(scanned_snapshot, [], ['skip'])
     assert [f['name'] for f in files] == ['a.txt']
+
+
+def test_group_paths_from_the_ui_match_a_windows_snapshot(client, config):
+    """The UI sends /C:/Users/a.txt; the snapshot is indexed as C:\\Users\\a.txt."""
+    filename = 'snapshot_1_3.jsonl.gz'
+    write_snapshot(config, filename, _windows_snapshot())
+    client.post('/api/v1/load_snapshot', json={'filename': filename})
+
+    added = client.post(f'/api/v1/group/{filename}/add_file',
+                        json={'path': '/C:/Users/a.txt', 'group_name': 'keep'})
+    assert added.status_code == 200
+
+    selected = [f['full_path'] for f in get_filtered_files(filename, ['keep'], [])]
+    assert selected == ['C:\\Users\\a.txt']
+
+
+def test_truncated_index_snapshot_is_rejected(client, config, sample_tree):
+    """A half-written pair of files must not load as a shorter snapshot."""
+    import gzip
+
+    from fshub.scanning import run_scan_to_snapshot
+
+    filename = run_scan_to_snapshot(str(sample_tree), use_index=True)['result_file']
+    data_path = os.path.join(config.snapshot_dir,
+                             filename.replace('_index.jsonl.gz', '.bin.gz'))
+
+    with gzip.open(data_path, 'rt', encoding='utf-8') as f:
+        lines = f.readlines()
+    with gzip.open(data_path, 'wt', encoding='utf-8') as f:
+        f.writelines(lines[:-1])
+
+    response = client.post('/api/v1/load_snapshot', json={'filename': filename})
+
+    assert response.status_code == 400
+    assert filename not in loaded_snapshots
+
+
+def test_corrupt_snapshot_is_a_client_error(client, config):
+    """A snapshot from a killed scan is an operator problem, not a 500."""
+    path = os.path.join(config.snapshot_dir, 'snapshot_1_1.jsonl.gz')
+    with open(path, 'wb') as f:
+        f.write(b'not gzip at all')
+
+    response = client.post('/api/v1/load_snapshot', json={'filename': 'snapshot_1_1.jsonl.gz'})
+
+    assert response.status_code == 400
+    assert 'Invalid snapshot file' in response.get_json()['error']
