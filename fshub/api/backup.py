@@ -1,368 +1,492 @@
 """Backup API endpoints"""
 
-from flask import Blueprint, request, jsonify
+import json
 import os
 import shutil
-import zipfile
-import json
-import time
+import tempfile
 import threading
+import time
+import traceback
 import uuid
-from datetime import datetime
-from ..config import Config
-from .explorer import get_filtered_files
+import zipfile
+
+from flask import Blueprint, jsonify
+
+from ..config import get_config
+from ..utils import (
+    UnsafePathError,
+    encode_name_component,
+    ensure_within,
+    snapshot_relative_path,
+)
+from . import json_body, validate_group_filters
+from .explorer import get_filtered_files, get_snapshot_os, loaded_snapshots
 
 backup_bp = Blueprint('backup_bp', __name__)
 
-# Global dictionary to store backup task states
+# Backup task states, guarded by backup_lock.
 backup_tasks = {}
+backup_lock = threading.Lock()
 
-# Base path for backup logs
-backup_log_dir = os.path.expanduser('~/.fshub/backups')
-os.makedirs(backup_log_dir, exist_ok=True)
+FINISHED = ('completed', 'completed_with_errors', 'error', 'cancelled')
+MAX_FINISHED_TASKS = 50
+MAX_REPORTED_ERRORS = 20
+DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
+COPY_BUFFER = 1024 * 1024
+STAGE_MEMORY_LIMIT = 8 * COPY_BUFFER
+
+
+class BackupLog:
+    """Append-only JSONL log kept open for the duration of a backup."""
+
+    def __init__(self, path, meta):
+        self.path = path
+        # 'x': a run must never truncate another run's log.
+        self._file = open(path, 'x', encoding='utf-8')
+        self.write(meta)
+
+    def write(self, entry):
+        self._file.write(json.dumps(entry) + '\n')
+        self._file.flush()
+
+    def record(self, src, dest, size, action, result):
+        self.write({
+            'timestamp': int(time.time()),
+            'src_path': src,
+            'dest_path': dest,
+            'filesize': size,
+            'action': action,
+            'result': result,
+        })
+
+    def close(self):
+        self._file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _prune_finished_tasks():
+    finished = [
+        (info['start_time'], task_id)
+        for task_id, info in backup_tasks.items()
+        if info['status'] in FINISHED
+    ]
+    if len(finished) <= MAX_FINISHED_TASKS:
+        return
+    finished.sort()
+    for _, task_id in finished[: len(finished) - MAX_FINISHED_TASKS]:
+        backup_tasks.pop(task_id, None)
+
+
+def _update_task(task_id, **fields):
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is not None:
+            task.update(fields)
+
+
+def _task_status(task_id):
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        return task['status'] if task else None
+
+
+def _create_task(total_files):
+    task_id = str(uuid.uuid4())
+    with backup_lock:
+        _prune_finished_tasks()
+        backup_tasks[task_id] = {
+            'status': 'started',
+            'progress': 0,
+            'total_files': total_files,
+            'completed_files': 0,
+            'failed_files': 0,
+            'current_file': None,
+            'start_time': time.time(),
+            'error': None,
+            'errors': [],
+        }
+    return task_id
+
+
+def _begin_task(task_id):
+    """Move a task to 'running', unless it was stopped before we got here.
+
+    Compare-and-set: overwriting 'stopped' with 'running' would silently
+    discard a stop request that arrived while the thread was starting.
+    """
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None or task['status'] != 'started':
+            return False
+        task['status'] = 'running'
+        return True
+
+
+def _record(task_id, log, src, dest, size, error=None):
+    """Log one file and update the task counters (error=None means success)."""
+    log.record(src, dest, size, 'failed' if error else 'backup',
+               str(error) if error else 'success')
+
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return
+        if error:
+            task['failed_files'] += 1
+            if len(task['errors']) < MAX_REPORTED_ERRORS:
+                task['errors'].append({'path': src, 'error': str(error)})
+        else:
+            task['completed_files'] += 1
+        done = task['completed_files'] + task['failed_files']
+        task['progress'] = int(done / task['total_files'] * 100) if task['total_files'] else 100
+        task['current_file'] = src
+
+
+def _finish_task(task_id):
+    """Close a task. A run that lost files must never report plain success."""
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return
+        # stop_backup_task() can win the lock after the last per-file check.
+        # Never overwrite its accepted stop request with a completed state.
+        if task['status'] == 'stopped':
+            task['status'] = 'cancelled'
+            task['current_file'] = None
+            return
+
+        failed = task['failed_files']
+        task['status'] = 'completed_with_errors' if failed else 'completed'
+        task['progress'] = 100
+        task['current_file'] = None
+        if failed:
+            task['error'] = f"{failed} of {task['total_files']} files failed"
+
+
+def _open_log(backup_target_name, backup_name, file_count, meta):
+    """Create the backup log inside the configured data directory.
+
+    Returns (log, run_id). The run id also names the archives of a zip run,
+    so it has to be unique: a wall-clock second is not, since two runs with
+    the same names and file count can start within one second and would then
+    share both the log path and the archive names.
+    """
+    log_dir = get_config().backup_log_dir
+    os.makedirs(log_dir, exist_ok=True)
+
+    timestamp = int(time.time())
+    # Encoded, not rejected: "My Backup" is a perfectly normal label and the
+    # original text is kept verbatim in the log metadata.
+    target = encode_name_component(backup_target_name, what='backup_target_name')
+    name = encode_name_component(backup_name, what='backup_name')
+    run_id = f'{name}_{timestamp}_{uuid.uuid4().hex[:8]}'
+    log_path = os.path.join(log_dir, f'{target}_{run_id}_{file_count}.jl')
+
+    meta = dict(meta, timestamp=timestamp, run_id=run_id)
+    return BackupLog(log_path, meta), run_id
+
+
+def _prepare_backup(data, backup_type):
+    """Shared validation for both backup endpoints.
+
+    Returns (context_dict, None) or (None, (payload, status)).
+    """
+    snapshot_filename = data.get('snapshot_filename', '')
+    target_path = data.get('target_path', '')
+
+    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+        return None, ({'error': 'snapshot_filename must be a non-empty string'}, 400)
+    if not isinstance(target_path, str) or not target_path:
+        return None, ({'error': 'target_path must be a non-empty string'}, 400)
+
+    dry_run = data.get('dry_run', False)
+    if not isinstance(dry_run, bool):
+        return None, ({'error': 'dry_run must be a boolean'}, 400)
+
+    if snapshot_filename not in loaded_snapshots:
+        return None, ({'error': f'Snapshot not loaded: {snapshot_filename}'}, 400)
+
+    if not os.path.isabs(target_path):
+        return None, ({'error': 'target_path must be an absolute path'}, 400)
+
+    # Both backup types write *into* the target, so an existing file there is
+    # a user error worth reporting before a task is started.
+    if os.path.exists(target_path) and not os.path.isdir(target_path):
+        return None, ({'error': 'target_path must be a directory'}, 400)
+
+    filter_in = data.get('filter_in', [])
+    filter_out = data.get('filter_out', [])
+    filter_error = validate_group_filters(filter_in, filter_out)
+    if filter_error:
+        return None, ({'error': filter_error}, 400)
+
+    snapshot_os = get_snapshot_os(snapshot_filename)
+    files_to_backup = get_filtered_files(snapshot_filename, filter_in, filter_out)
+    if not files_to_backup:
+        return None, ({'error': 'No files to backup with the given filters'}, 400)
+
+    return {
+        'snapshot_filename': snapshot_filename,
+        'snapshot_os': snapshot_os,
+        'target_path': os.path.realpath(target_path),
+        'files': files_to_backup,
+        'meta': {
+            'backup_target_name': data.get('backup_target_name', 'backup_target'),
+            'backup_name': data.get('backup_name', 'backup'),
+            'filter_in': filter_in,
+            'filter_out': filter_out,
+            'snapshot': snapshot_filename,
+            'backup_type': backup_type,
+            'target_path': target_path,
+        },
+    }, None
 
 
 @backup_bp.route('/api/v1/backup/zip', methods=['POST'])
 def create_zip_backup():
     """Create a zip backup with filtered files"""
-    data = request.get_json()
-    snapshot_filename = data.get('snapshot_filename', '')
-    target_path = data.get('target_path', '')
-    filter_in = data.get('filter_in', [])
-    filter_out = data.get('filter_out', [])
-    compress_level = data.get('compress_level', 6)  # Default compression level
-    dry_run = data.get('dry_run', False)  # Added dry_run parameter
-    backup_name = data.get('backup_name', 'backup')
-    backup_target_name = data.get('backup_target_name', 'backup_target')
-    max_file_size = data.get('max_file_size', 100 * 1024 * 1024)  # Default 100 MB
+    data = json_body()
+    ctx, error = _prepare_backup(data, 'zip')
+    if error:
+        payload, status = error
+        return jsonify(payload), status
 
-    if not snapshot_filename or not target_path:
-        return jsonify({'error': 'Snapshot filename and target path are required'}), 400
-
-    # Get files based on filters
-    files_to_backup = get_filtered_files(snapshot_filename, filter_in, filter_out)
-
-    if not files_to_backup:
-        return jsonify({'error': 'No files to backup with the given filters'}), 400
-
-    # If dry_run, return the files that would be backed up without actually backing them up
-    if dry_run:
+    if data.get('dry_run', False):
         return jsonify({
             'success': True,
-            'files_found': len(files_to_backup),
-            'files_to_backup': files_to_backup,
+            'files_found': len(ctx['files']),
+            'files_to_backup': ctx['files'],
             'dry_run': True
         })
 
-    # Generate a unique task ID for this backup
-    task_id = str(uuid.uuid4())
+    try:
+        compress_level = int(data.get('compress_level', 6))
+        max_file_size = int(data.get('max_file_size', DEFAULT_MAX_FILE_SIZE))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'compress_level and max_file_size must be integers'}), 400
 
-    # Create backup task
-    backup_tasks[task_id] = {
-        'status': 'started',
-        'progress': 0,
-        'total_files': len(files_to_backup),
-        'completed_files': 0,
-        'current_file': None,
-        'start_time': time.time(),
-        'error': None
-    }
+    if not 0 <= compress_level <= 9:
+        return jsonify({'error': 'compress_level must be between 0 and 9'}), 400
+    if max_file_size <= 0:
+        return jsonify({'error': 'max_file_size must be positive'}), 400
 
-    # Create backup log
-    timestamp = int(time.time())
-    log_filename = f"{backup_target_name}_{backup_name}_{len(files_to_backup)}_{timestamp}.jl"
-    log_path = os.path.join(backup_log_dir, log_filename)
+    try:
+        log, run_id = _open_log(
+            ctx['meta']['backup_target_name'], ctx['meta']['backup_name'],
+            len(ctx['files']), ctx['meta'],
+        )
+    except (UnsafePathError, OSError) as e:
+        return jsonify({'error': str(e)}), 400
 
-    # Write metadata to log
-    with open(log_path, 'w') as log_file:
-        meta_info = {
-            'timestamp': timestamp,
-            'backup_target_name': backup_target_name,
-            'backup_name': backup_name,
-            'filter_in': filter_in,
-            'filter_out': filter_out,
-            'snapshot': snapshot_filename,
-            'backup_type': 'zip',
-            'target_path': target_path
-        }
-        log_file.write(json.dumps(meta_info) + '\n')
-
-    # Start the backup in a separate thread
-    thread = threading.Thread(
+    task_id = _create_task(len(ctx['files']))
+    threading.Thread(
         target=perform_zip_backup,
-        args=(task_id, files_to_backup, target_path, compress_level, max_file_size, log_path)
-    )
-    thread.start()
+        args=(task_id, ctx['files'], ctx['target_path'], compress_level,
+              max_file_size, log, ctx['snapshot_os'], run_id),
+        daemon=True,
+    ).start()
 
     return jsonify({
         'success': True,
         'task_id': task_id,
         'message': 'Backup started',
-        'files_to_backup': len(files_to_backup)
+        'files_to_backup': len(ctx['files'])
     })
 
 
 @backup_bp.route('/api/v1/backup/folder', methods=['POST'])
 def create_folder_backup():
     """Create a folder backup with filtered files"""
-    data = request.get_json()
-    snapshot_filename = data.get('snapshot_filename', '')
-    target_path = data.get('target_path', '')
-    filter_in = data.get('filter_in', [])
-    filter_out = data.get('filter_out', [])
-    dry_run = data.get('dry_run', False)  # Added dry_run parameter
-    backup_name = data.get('backup_name', 'backup')
-    backup_target_name = data.get('backup_target_name', 'backup_target')
+    data = json_body()
+    ctx, error = _prepare_backup(data, 'folder')
+    if error:
+        payload, status = error
+        return jsonify(payload), status
 
-    if not snapshot_filename or not target_path:
-        return jsonify({'error': 'Snapshot filename and target path are required'}), 400
-
-    # Get files based on filters
-    files_to_backup = get_filtered_files(snapshot_filename, filter_in, filter_out)
-
-    if not files_to_backup:
-        return jsonify({'error': 'No files to backup with the given filters'}), 400
-
-    # If dry_run, return the files that would be backed up without actually backing them up
-    if dry_run:
+    if data.get('dry_run', False):
         return jsonify({
             'success': True,
-            'files_found': len(files_to_backup),
-            'files_to_backup': files_to_backup,
+            'files_found': len(ctx['files']),
+            'files_to_backup': ctx['files'],
             'dry_run': True
         })
 
-    # Generate a unique task ID for this backup
-    task_id = str(uuid.uuid4())
+    try:
+        log, _run_id = _open_log(
+            ctx['meta']['backup_target_name'], ctx['meta']['backup_name'],
+            len(ctx['files']), ctx['meta'],
+        )
+    except (UnsafePathError, OSError) as e:
+        return jsonify({'error': str(e)}), 400
 
-    # Create backup task
-    backup_tasks[task_id] = {
-        'status': 'started',
-        'progress': 0,
-        'total_files': len(files_to_backup),
-        'completed_files': 0,
-        'current_file': None,
-        'start_time': time.time(),
-        'error': None
-    }
-
-    # Create backup log
-    timestamp = int(time.time())
-    log_filename = f"{backup_target_name}_{backup_name}_{len(files_to_backup)}_{timestamp}.jl"
-    log_path = os.path.join(backup_log_dir, log_filename)
-
-    # Write metadata to log
-    with open(log_path, 'w') as log_file:
-        meta_info = {
-            'timestamp': timestamp,
-            'backup_target_name': backup_target_name,
-            'backup_name': backup_name,
-            'filter_in': filter_in,
-            'filter_out': filter_out,
-            'snapshot': snapshot_filename,
-            'backup_type': 'folder',
-            'target_path': target_path
-        }
-        log_file.write(json.dumps(meta_info) + '\n')
-
-    # Start the backup in a separate thread
-    thread = threading.Thread(
+    task_id = _create_task(len(ctx['files']))
+    threading.Thread(
         target=perform_folder_backup,
-        args=(task_id, files_to_backup, target_path, log_path)
-    )
-    thread.start()
+        args=(task_id, ctx['files'], ctx['target_path'], log, ctx['snapshot_os']),
+        daemon=True,
+    ).start()
 
     return jsonify({
         'success': True,
         'task_id': task_id,
         'message': 'Backup started',
-        'files_to_backup': len(files_to_backup)
+        'files_to_backup': len(ctx['files'])
     })
 
 
 @backup_bp.route('/api/v1/backup/status/<task_id>', methods=['GET'])
 def get_backup_status(task_id):
     """Get the status of a backup task"""
-    if task_id not in backup_tasks:
-        return jsonify({'error': 'Task not found'}), 404
-
-    return jsonify(backup_tasks[task_id])
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return jsonify({'error': 'Task not found'}), 404
+        return jsonify(dict(task))
 
 
 @backup_bp.route('/api/v1/backup/stop/<task_id>', methods=['POST'])
 def stop_backup_task(task_id):
-    """Stop a backup task"""
-    if task_id not in backup_tasks:
-        return jsonify({'error': 'Task not found'}), 404
+    """Request that a backup task stops"""
+    with backup_lock:
+        task = backup_tasks.get(task_id)
+        if task is None:
+            return jsonify({'error': 'Task not found'}), 404
+        if task['status'] in FINISHED:
+            return jsonify({'success': False, 'message': f"Task already {task['status']}"})
+        task['status'] = 'stopped'
 
-    backup_tasks[task_id]['status'] = 'stopped'
     return jsonify({'success': True, 'message': 'Backup task stopped'})
 
 
-def perform_zip_backup(task_id, files_to_backup, target_path, compress_level, max_file_size, log_path):
+def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
+                       max_file_size, log, snapshot_os, run_id):
     """Perform the actual zip backup in a separate thread"""
     try:
-        compression_method = zipfile.ZIP_DEFLATED
-        # Create target directory if it doesn't exist
+        if not _begin_task(task_id):
+            _update_task(task_id, status='cancelled')
+            return
+
         os.makedirs(target_path, exist_ok=True)
 
-        # Process files in chunks based on max_file_size
+        total = len(files_to_backup)
         files_processed = 0
         zip_index = 0
 
-        while files_processed < len(files_to_backup):
-            # Create a new zip file for this chunk
-            # If target_path is a directory, use backup name in filename; otherwise use base of target path
-            if os.path.isdir(target_path):
-                zip_filename = os.path.join(target_path, f"backup_{zip_index:03d}.zip")
-            else:
-                base_name = os.path.splitext(os.path.basename(target_path))[0]
-                zip_filename = f"{base_name}_{zip_index:03d}.zip" if zip_index > 0 else target_path
+        while files_processed < total:
+            # Archives carry the run id, so backing up twice into the same
+            # directory adds a new set instead of destroying the previous one.
+            zip_filename = os.path.join(target_path, f'{run_id}_{zip_index:03d}.zip')
 
-            with zipfile.ZipFile(zip_filename, 'w', compression=compression_method, compresslevel=compress_level) as zipf:
+            # 'x' rather than 'w': never silently clobber an existing archive.
+            with zipfile.ZipFile(zip_filename, 'x', compression=zipfile.ZIP_DEFLATED,
+                                 compresslevel=compress_level) as zipf:
                 chunk_size = 0
 
-                # Add files to this zip until we hit the size limit or run out of files
-                while files_processed < len(files_to_backup):
-                    file_info = files_to_backup[files_processed]
-                    file_size = file_info.get('size', 0)
+                while files_processed < total:
+                    if _task_status(task_id) == 'stopped':
+                        _update_task(task_id, status='cancelled')
+                        return
 
-                    # Check if adding this file would exceed the size limit (for second+ zip files)
+                    source_path = files_to_backup[files_processed]['full_path']
+
+                    # The size on disk, not the snapshot's stale copy: the
+                    # split limit has to match what is actually archived.
+                    try:
+                        file_size = os.path.getsize(source_path)
+                    except OSError as e:
+                        _record(task_id, log, source_path, zip_filename, 0, e)
+                        files_processed += 1
+                        continue
+
+                    # Start a new archive rather than blowing past the limit.
                     if chunk_size > 0 and chunk_size + file_size > max_file_size:
-                        # This file will go to the next zip file
                         break
 
-                    # Add the full path inside the zip to maintain directory structure
-                    # Use the full path from the snapshot, not just the filename
-                    zip_path = file_info['full_path'].lstrip('/')  # Remove leading slash to avoid absolute paths
+                    # Drive letters / leading separators are stripped so the
+                    # entry can never point outside the archive root.
+                    arcname = snapshot_relative_path(source_path, snapshot_os)
 
-                    # Check if the original file exists before processing
-                    original_path = file_info['full_path']
-                    if not os.path.exists(original_path):
-                        with open(log_path, 'a') as log_file:
-                            log_entry = {
-                                'timestamp': int(time.time()),
-                                'src_path': file_info['full_path'],
-                                'dest_path': zip_filename,
-                                'filesize': file_size,
-                                'action': 'failed',
-                                'result': 'Source file does not exist'
-                            }
-                            log_file.write(json.dumps(log_entry) + '\n')
-                        print(f"Warning: Source file does not exist: {original_path}")
-                        files_processed += 1
-                        continue
-
-                    # Actually read and compress the file content
+                    # Read the complete source before opening a ZIP member. If
+                    # the source fails halfway through, zipfile would otherwise
+                    # finalize and expose that truncated member under its real
+                    # name. Small files stay in memory; large ones spill to a
+                    # temporary file.
                     try:
-                        with open(original_path, 'rb') as src_file:
-                            file_content = src_file.read()
-                            zipf.writestr(zip_path, file_content)
-                    except Exception as e:
-                        with open(log_path, 'a') as log_file:
-                            log_entry = {
-                                'timestamp': int(time.time()),
-                                'src_path': file_info['full_path'],
-                                'dest_path': zip_filename,
-                                'filesize': file_size,
-                                'action': 'failed',
-                                'result': f'Error reading/compressing file: {str(e)}'
-                            }
-                            log_file.write(json.dumps(log_entry) + '\n')
-                        print(f"Error reading/compressing file {original_path}: {str(e)}")
+                        with tempfile.SpooledTemporaryFile(
+                                max_size=STAGE_MEMORY_LIMIT, mode='w+b') as staged:
+                            with open(source_path, 'rb') as src:
+                                shutil.copyfileobj(src, staged, COPY_BUFFER)
+                            staged.seek(0)
+                            with zipf.open(arcname, 'w') as dst:
+                                shutil.copyfileobj(staged, dst, COPY_BUFFER)
+                    except OSError as e:
+                        _record(task_id, log, source_path, zip_filename, file_size, e)
                         files_processed += 1
                         continue
 
-                    # Log the backup operation
-                    with open(log_path, 'a') as log_file:
-                        log_entry = {
-                            'timestamp': int(time.time()),
-                            'src_path': file_info['full_path'],
-                            'dest_path': zip_filename,
-                            'filesize': file_size,
-                            'action': 'backup',
-                            'result': 'success'
-                        }
-                        log_file.write(json.dumps(log_entry) + '\n')
-
+                    _record(task_id, log, source_path, zip_filename, file_size)
                     chunk_size += file_size
                     files_processed += 1
 
-                    # Update task progress
-                    backup_tasks[task_id]['completed_files'] = files_processed
-                    backup_tasks[task_id]['progress'] = int((files_processed / len(files_to_backup)) * 100)
-                    backup_tasks[task_id]['current_file'] = file_info['full_path']
-
-                    # Check if task was stopped
-                    if backup_tasks[task_id]['status'] == 'stopped':
-                        backup_tasks[task_id]['status'] = 'cancelled'
-                        return
-
             zip_index += 1
 
-        # Mark task as complete
-        backup_tasks[task_id]['status'] = 'completed'
-        backup_tasks[task_id]['progress'] = 100
-        backup_tasks[task_id]['completed_files'] = len(files_to_backup)
+        _finish_task(task_id)
 
-    except Exception as e:
-        backup_tasks[task_id]['status'] = 'error'
-        backup_tasks[task_id]['error'] = str(e)
+    except Exception as e:  # noqa: BLE001 - reported through the task state
+        traceback.print_exc()
+        _update_task(task_id, status='error', error=str(e))
+    finally:
+        log.close()
 
 
-def perform_folder_backup(task_id, files_to_backup, target_path, log_path):
+def perform_folder_backup(task_id, files_to_backup, target_path, log, snapshot_os):
     """Perform the actual folder backup in a separate thread"""
     try:
-        # Create target directory if it doesn't exist
+        if not _begin_task(task_id):
+            _update_task(task_id, status='cancelled')
+            return
+
         os.makedirs(target_path, exist_ok=True)
 
-        for i, file_info in enumerate(files_to_backup):
-            # Calculate progress
-            backup_tasks[task_id]['completed_files'] = i + 1
-            backup_tasks[task_id]['progress'] = int(((i + 1) / len(files_to_backup)) * 100)
-            backup_tasks[task_id]['current_file'] = file_info['full_path']
-
-            # Create the full destination path maintaining directory structure
-            # Remove leading slash from full_path to create relative path
-            relative_path = file_info['full_path'].lstrip('/')
-            dest_full_path = os.path.join(target_path, relative_path)
-
-            # Create parent directories if they don't exist
-            dest_dir = os.path.dirname(dest_full_path)
-            os.makedirs(dest_dir, exist_ok=True)
-
-            # Actually copy the file to the destination
-            original_path = file_info['full_path']
-            if os.path.exists(original_path):
-                # Copy the file content
-                shutil.copy2(original_path, dest_full_path)  # copy2 preserves metadata
-                resstr = 'success'
-            else:
-                resstr = 'failed: source file does not exist'
-                print(f"Warning: Source file does not exist: {original_path}")
-
-            # Log the backup operation
-            with open(log_path, 'a') as log_file:
-                log_entry = {
-                    'timestamp': int(time.time()),
-                    'src_path': file_info['full_path'],
-                    'dest_path': dest_full_path,
-                    'filesize': file_info.get('size', 0),
-                    'action': 'backup',
-                    'result': resstr
-                }
-                log_file.write(json.dumps(log_entry) + '\n')
-
-            # Check if task was stopped
-            if backup_tasks[task_id]['status'] == 'stopped':
-                backup_tasks[task_id]['status'] = 'cancelled'
+        for file_info in files_to_backup:
+            if _task_status(task_id) == 'stopped':
+                _update_task(task_id, status='cancelled')
                 return
 
-        # Mark task as complete
-        backup_tasks[task_id]['status'] = 'completed'
-        backup_tasks[task_id]['progress'] = 100
-        backup_tasks[task_id]['completed_files'] = len(files_to_backup)
+            source_path = file_info['full_path']
+            size = file_info.get('size', 0) or 0
 
-    except Exception as e:
-        backup_tasks[task_id]['status'] = 'error'
-        backup_tasks[task_id]['error'] = str(e)
+            relative_path = snapshot_relative_path(source_path, snapshot_os)
+            dest_full_path = os.path.join(target_path, *relative_path.split('/'))
+            dest_dir = os.path.dirname(dest_full_path)
+
+            try:
+                # Check the parent *before* creating it: a symlinked component
+                # already in the target would otherwise let makedirs() build a
+                # directory tree outside of it. The complete path is checked
+                # again afterwards so a pre-existing symlink there cannot make
+                # copy2 write straight through it either.
+                ensure_within(target_path, dest_dir, what='destination')
+                os.makedirs(dest_dir, exist_ok=True)
+                ensure_within(target_path, dest_full_path, what='destination')
+                if os.path.islink(dest_full_path):
+                    raise UnsafePathError(f'Destination is a symlink: {dest_full_path}')
+                shutil.copy2(source_path, dest_full_path)
+            except (OSError, UnsafePathError) as e:
+                _record(task_id, log, source_path, dest_full_path, size, e)
+                continue
+
+            _record(task_id, log, source_path, dest_full_path, size)
+
+        _finish_task(task_id)
+
+    except Exception as e:  # noqa: BLE001 - reported through the task state
+        traceback.print_exc()
+        _update_task(task_id, status='error', error=str(e))
+    finally:
+        log.close()

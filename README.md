@@ -4,16 +4,12 @@ fshub is a Python package for managing files across multiple devices. It provide
 
 ## Features
 
-- Web-based file explorer
+- Web-based file explorer with recursive directory size / file counts
 - Device management
-- File scanning and hashing
-- Group management
-- Backup functionality
+- File scanning and hashing (including duplicate detection)
+- Group management (include/exclude filters)
+- Backup to a folder or to split zip archives
 - Cross-platform support (Windows and Linux)
-- Recursive directory size and file count display
-- Filename truncation with popup for long names
-- Unix timestamp support for file metadata
-- Enhanced OS information display for devices
 
 ## Installation
 
@@ -29,32 +25,90 @@ fshub web
 
 # Generate a default configuration
 fshub config gen
+
+# Scan a directory from the command line
+fshub scan /home/me --skip-path /home/me/.cache
+```
+
+`fshub web` is the localhost convenience runner. For a long running
+deployment use any WSGI server:
+
+```bash
+gunicorn -b 127.0.0.1:7303 'fshub.web:create_app()'
 ```
 
 ## Configuration
 
-The configuration file is stored as `fshub.yaml` in the current directory or `~/.config/fshub.yaml`.
+The configuration file is read from `fshub.yaml` in the current directory, or
+`~/.config/fshub.yaml`. See [`fshub.yaml.example`](fshub.yaml.example).
 
-## New Features & Updates
+```yaml
+data_path: ~/.fshub/
+listen_ip: localhost
+listen_port: 7303
+```
 
-### Explorer Tab Enhancements
-- **Recursive Directory Size & File Counts**: Directories now display total size and total file count including all subdirectories
-- **Unix Timestamp Support**: All file timestamps (created, modified, accessed) are stored as Unix timestamps instead of ISO strings
-- **Timestamp Formatting**: Timestamps are displayed to the second without fractional parts
+## Security
 
-### Device Management Improvements
-- **Automatic Device Detection**: System automatically checks if the current device is registered in the known devices list
-- **OS Information Display**: Added OS name and version to device information display
-- **Onboarding Flow**: Unregistered devices are automatically redirected to the device management tab with a registration form
+**fshub performs no authentication of its own.** Every API endpoint is open to
+anyone who can reach the port, and the API exposes file metadata as well as
+scan and backup operations that write to disk.
 
-### UI/UX Improvements
-- **Long Filename Handling**: Long filenames are now truncated with ellipsis in table cells and can be viewed fully in a popup modal
-- **Enhanced Device Information**: Added OS name, OS version, and OS release fields to device display
+- By default fshub binds to `localhost` only. Keep it that way.
+- If you need remote access, put it behind a reverse proxy that handles
+  authentication, e.g. nginx with HTTP basic auth:
 
-### Backend Changes
-- **Unix Timestamp Adoption**: All timestamp values (including scan start/finish times) are now stored as Unix timestamps
-- **Recursive Calculation**: Added recursive calculation functions for directory sizes and file counts
-- **System Information**: Enhanced system information collection with OS details
+```nginx
+server {
+    listen 443 ssl;
+    server_name fshub.example.com;
+
+    location / {
+        auth_basic           "fshub";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+
+        proxy_pass         http://127.0.0.1:7303;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Never expose fshub directly to an untrusted network.
+
+## Data layout
+
+Everything lives under `data_path`:
+
+```
+~/.fshub/
+├── snapshots/   # snapshot_<ts>_<count>_<uuid>.jsonl.gz and their *_groups.jl logs
+├── devices/     # devices_<host>.jl, media_<host>.jl
+└── backups/     # one JSONL log per backup run
+```
+
+Both backup types write *into* a target directory. Zip backups produce
+`<backup_name>_<timestamp>_<uuid>_NNN.zip`, and archives are opened with mode
+`x`, so running a backup twice into the same directory adds a new set rather
+than overwriting the previous one — even for two runs started within the same
+second. A run that could not copy every selected file finishes as
+`completed_with_errors` and reports `failed_files`/`errors`; it never claims
+success.
+
+Hashing is also asynchronous so a large snapshot does not occupy a web
+worker. `POST /api/v1/hash/calculate` and `POST /api/v1/hash/duplicates`
+return HTTP 202 with a `task_id`; poll `/api/v1/hash/status/<task_id>` until
+its status is `completed` or `error`. Successful output is in `result`.
+
+## Development
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest
+```
+
+See [DEVELOPER.md](DEVELOPER.md) for architecture notes.
 
 ## License
 

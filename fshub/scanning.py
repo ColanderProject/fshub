@@ -7,25 +7,67 @@ import os
 import platform
 import string
 import time
+import uuid
 
-from .config import Config
+from .config import get_config
 from .utils import get_system_info
 
 
 def _normalize_prefix(path):
-    """Normalize a path for prefix comparisons."""
+    """Normalize a path for prefix comparisons (no symlink resolution)."""
     return os.path.normcase(os.path.abspath(path))
+
+
+def _canonical_path(path):
+    """Like _normalize_prefix, but resolves symlinks so aliases compare equal."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def is_related_path(path_a, path_b):
+    """True when one path is the other, or contains it.
+
+    Compares whole path components so ``/home/a`` and ``/home/ab`` are not
+    considered related, and resolves symlinks so two aliases of one tree are
+    not scanned concurrently. On Windows ``/`` means "every drive", so it is
+    related to any path.
+    """
+    if platform.system() == 'Windows' and '/' in (path_a, path_b):
+        return True
+
+    a = _canonical_path(path_a).rstrip(os.sep)
+    b = _canonical_path(path_b).rstrip(os.sep)
+    if a == b:
+        return True
+    return a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
+def _init_counters(counters, current_path):
+    """Initialise shared counters once per scan run."""
+    counters.setdefault('scanned_count', 0)
+    counters.setdefault('scanned_size', 0)
+    counters.setdefault('errors', [])
+    counters['current_path'] = current_path
 
 
 def _normalize_skip_prefixes(skip_prefixes):
     """Normalize configured skip prefixes."""
-    return [_normalize_prefix(path) for path in skip_prefixes if path]
+    return [_normalize_prefix(path).rstrip(os.sep) or os.sep
+            for path in skip_prefixes if path]
 
 
 def _should_skip_path(path, normalized_skip_prefixes):
-    """Return True when a path starts with any configured skip prefix."""
+    """Return True when a path is, or lives under, a configured skip prefix.
+
+    Whole path components are compared, mirroring is_related_path: skipping
+    ``/home/a`` must not also skip the unrelated sibling ``/home/ab``.
+    """
     normalized_path = _normalize_prefix(path)
-    return any(normalized_path.startswith(prefix) for prefix in normalized_skip_prefixes)
+    for prefix in normalized_skip_prefixes:
+        if normalized_path == prefix:
+            return True
+        if normalized_path.startswith(prefix.rstrip(os.sep) + os.sep):
+            return True
+    return False
 
 
 def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
@@ -33,24 +75,19 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
     all_results = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
-    # Initialize counters
-    counters['scanned_count'] = 0
-    counters['scanned_size'] = 0
-    counters['errors'] = []
-    counters['current_path'] = '/'
+    _init_counters(counters, '/')
 
-    # Get all drive letters in Windows
-    drives = []
-    for letter in string.ascii_uppercase:
-        drive = f"{letter}:\\"
-        if os.path.exists(drive):
-            drives.append(drive)
+    # Skipped drives are dropped here, so the root entry never advertises a
+    # drive that was not scanned.
+    drives = [f'{letter}:\\' for letter in string.ascii_uppercase
+              if os.path.exists(f'{letter}:\\')
+              and not _should_skip_path(f'{letter}:\\', normalized_skip_prefixes)]
 
     # Create a root entry that represents "This PC"
     root_obj = {
         'p': '/',
         'f': [],
-        'd': [f"{letter}:" for letter in string.ascii_uppercase if os.path.exists(f"{letter}:\\")],
+        'd': [drive[:2] for drive in drives],
         't': [],
         'T': [],
         's': []
@@ -71,8 +108,6 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
     all_results.append(root_obj)
 
     for drive in drives:
-        if _should_skip_path(drive, normalized_skip_prefixes):
-            continue
         counters['current_path'] = drive
         if result_callback:
             result_callback(counters)
@@ -87,11 +122,9 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
     result = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
 
-    # Initialize counters
-    counters['scanned_count'] = 0
-    counters['scanned_size'] = 0
-    counters['errors'] = []
-    counters['current_path'] = path
+    # Counters accumulate across calls so scanning several Windows drives
+    # reports a single combined total.
+    _init_counters(counters, path)
 
     for root, dirs, files in os.walk(path):
         try:
@@ -163,13 +196,16 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
 
 def save_scan_result(scan_result, use_index=False):
     """Save scan results to the configured snapshot directory."""
-    timestamp = int(time.time())
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
+    config = get_config()
+    snapshot_dir = config.snapshot_dir
     os.makedirs(snapshot_dir, exist_ok=True)
 
+    # A wall-clock second plus an entry count is not unique: two concurrent
+    # scans can produce the same base name and one would overwrite the other
+    # (taking its group log with it), so add a random suffix.
+    filename_base = f'snapshot_{int(time.time())}_{len(scan_result)}_{uuid.uuid4().hex[:8]}'
+
     if use_index:
-        filename_base = f"snapshot_{timestamp}_{len(scan_result)}"
         index_filename = f"{filename_base}_index.jsonl.gz"
         bin_filename = f"{filename_base}.bin.gz"
 
@@ -199,7 +235,7 @@ def save_scan_result(scan_result, use_index=False):
             'data_path': bin_filepath,
         }
 
-    filename = f"snapshot_{timestamp}_{len(scan_result)}.jsonl.gz"
+    filename = f"{filename_base}.jsonl.gz"
     filepath = os.path.join(snapshot_dir, filename)
 
     with gzip.open(filepath, 'wt', encoding='utf-8') as f:
@@ -217,6 +253,7 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None, result_callb
     counters = counters if counters is not None else {}
     start_time = datetime.now()
     counters['skip_prefixes'] = list(skip_prefixes or [])
+    _init_counters(counters, scan_path)
 
     if platform.system() == 'Windows' and scan_path == '/':
         scan_result = scan_windows_drives(

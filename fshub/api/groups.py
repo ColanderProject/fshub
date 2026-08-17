@@ -1,35 +1,102 @@
 """Group management API endpoints"""
 
-from flask import Blueprint, request, jsonify
-import os
 import json
 from datetime import datetime
-from ..config import Config
-from .explorer import loaded_snapshots
+
+from flask import Blueprint, request, jsonify
+
+from ..utils import UnsafePathError
+from . import json_body
+from .explorer import (
+    from_web_path,
+    groups_path,
+    loaded_snapshots,
+    snapshots_lock,
+)
 
 group_bp = Blueprint('group_bp', __name__)
+
+
+def _read_group_request(snapshot_filename):
+    """Validate a group mutation request.
+
+    Returns (path, group_name, None) or (None, None, (payload, status)).
+    """
+    data = json_body()
+    item_path = data.get('path', '')
+    group_name = data.get('group_name', '')
+
+    # Truthiness is not enough: a JSON list would reach the group dict as an
+    # unhashable key and turn a client error into a 500.
+    if not isinstance(item_path, str) or not isinstance(group_name, str):
+        return None, None, ({'error': 'Path and group name must be strings'}, 400)
+
+    if not item_path or not group_name:
+        return None, None, ({'error': 'Path and group name are required'}, 400)
+
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return None, None, ({'error': 'Snapshot not loaded'}, 400)
+        data_rows = entry['data']
+        snapshot_os = data_rows[0].get('os_name') if data_rows else None
+
+    # The UI navigates in web paths (/C:/Users), the snapshot is indexed by
+    # native ones (C:\Users). Convert here so a group entry always matches.
+    item_path = from_web_path(item_path, snapshot_os)
+
+    return item_path, group_name, None
+
+
+def _mutate_group(snapshot_filename, item_type, action_type):
+    item_path, group_name, error = _read_group_request(snapshot_filename)
+    if error:
+        payload, status = error
+        return jsonify(payload), status
+
+    # The durable log and the in-memory state must move together, otherwise
+    # concurrent add/remove calls can persist in the opposite order and the
+    # group changes meaning after a reload. The log is written first so a
+    # failed write never leaves an unpersisted in-memory change.
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
+
+        try:
+            save_group_action(snapshot_filename, item_path, item_type, group_name, action_type)
+        except UnsafePathError as e:
+            return jsonify({'error': str(e)}), 400
+        except OSError as e:
+            return jsonify({'error': f'Could not persist group change: {e}'}), 500
+
+        group = entry['groups'].setdefault(group_name, {'f': set(), 'd': set()})
+        if action_type == 'add':
+            group[item_type].add(item_path)
+        else:
+            group[item_type].discard(item_path)
+
+    return jsonify({'success': True})
 
 
 @group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
 def get_groups(snapshot_filename):
     """Get all groups for a specific snapshot with file and directory counts"""
-    if snapshot_filename not in loaded_snapshots:
-        # Load groups from file if not already loaded
-        return jsonify({'error': 'Snapshot not loaded'}), 400
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    snapshot_groups = loaded_snapshots.get(snapshot_filename, {}).get('groups', {})
-    groups_with_counts = []
-
-    for group_name, items in snapshot_groups.items():
-        file_count = len(items.get('f', set()))
-        dir_count = len(items.get('d', set()))
-
-        groups_with_counts.append({
-            'name': group_name,
-            'file_count': file_count,
-            'dir_count': dir_count,
-            'total_count': file_count + dir_count
-        })
+        groups_with_counts = []
+        for group_name, items in entry['groups'].items():
+            file_count = len(items.get('f', set()))
+            dir_count = len(items.get('d', set()))
+            groups_with_counts.append({
+                'name': group_name,
+                'file_count': file_count,
+                'dir_count': dir_count,
+                'total_count': file_count + dir_count
+            })
 
     return jsonify({'groups': groups_with_counts})
 
@@ -37,97 +104,25 @@ def get_groups(snapshot_filename):
 @group_bp.route('/api/v1/group/<snapshot_filename>/add_file', methods=['POST'])
 def add_file_to_group(snapshot_filename):
     """Add a file to a group"""
-    data = request.get_json()
-    file_path = data.get('path', '')
-    group_name = data.get('group_name', '')
-
-    if not file_path or not group_name:
-        return jsonify({'error': 'Path and group name are required'}), 400
-
-    # Add to in-memory storage
-    if snapshot_filename not in loaded_snapshots:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
-
-    if group_name not in loaded_snapshots[snapshot_filename]['groups']:
-        loaded_snapshots[snapshot_filename]['groups'][group_name] = {'f': set(), 'd': set()}
-
-    loaded_snapshots[snapshot_filename]['groups'][group_name]['f'].add(file_path)
-
-    # Save to file
-    save_group_action(snapshot_filename, file_path, 'f', group_name, 'add')
-
-    return jsonify({'success': True})
+    return _mutate_group(snapshot_filename, 'f', 'add')
 
 
 @group_bp.route('/api/v1/group/<snapshot_filename>/add_dir', methods=['POST'])
 def add_dir_to_group(snapshot_filename):
     """Add a directory to a group"""
-    data = request.get_json()
-    dir_path = data.get('path', '')
-    group_name = data.get('group_name', '')
-
-    if not dir_path or not group_name:
-        return jsonify({'error': 'Path and group name are required'}), 400
-
-    # Add to in-memory storage
-    if snapshot_filename not in loaded_snapshots:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
-
-    if group_name not in loaded_snapshots[snapshot_filename]['groups']:
-        loaded_snapshots[snapshot_filename]['groups'][group_name] = {'f': set(), 'd': set()}
-
-    loaded_snapshots[snapshot_filename]['groups'][group_name]['d'].add(dir_path)
-
-    # Save to file
-    save_group_action(snapshot_filename, dir_path, 'd', group_name, 'add')
-
-    return jsonify({'success': True})
+    return _mutate_group(snapshot_filename, 'd', 'add')
 
 
 @group_bp.route('/api/v1/group/<snapshot_filename>/remove_file', methods=['POST'])
 def remove_file_from_group(snapshot_filename):
     """Remove a file from a group"""
-    data = request.get_json()
-    file_path = data.get('path', '')
-    group_name = data.get('group_name', '')
-
-    if not file_path or not group_name:
-        return jsonify({'error': 'Path and group name are required'}), 400
-
-    # Remove from in-memory storage
-    if snapshot_filename not in loaded_snapshots:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
-
-    if (group_name in loaded_snapshots[snapshot_filename]['groups']):
-        loaded_snapshots[snapshot_filename]['groups'][group_name]['f'].discard(file_path)
-
-    # Save to file
-    save_group_action(snapshot_filename, file_path, 'f', group_name, 'del')
-
-    return jsonify({'success': True})
+    return _mutate_group(snapshot_filename, 'f', 'del')
 
 
 @group_bp.route('/api/v1/group/<snapshot_filename>/remove_dir', methods=['POST'])
 def remove_dir_from_group(snapshot_filename):
     """Remove a directory from a group"""
-    data = request.get_json()
-    dir_path = data.get('path', '')
-    group_name = data.get('group_name', '')
-
-    if not dir_path or not group_name:
-        return jsonify({'error': 'Path and group name are required'}), 400
-
-    # Remove from in-memory storage
-    if snapshot_filename not in loaded_snapshots:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
-
-    if (group_name in loaded_snapshots[snapshot_filename]['groups']):
-        loaded_snapshots[snapshot_filename]['groups'][group_name]['d'].discard(dir_path)
-
-    # Save to file
-    save_group_action(snapshot_filename, dir_path, 'd', group_name, 'del')
-
-    return jsonify({'success': True})
+    return _mutate_group(snapshot_filename, 'd', 'del')
 
 
 @group_bp.route('/api/v1/group/<snapshot_filename>/files', methods=['GET'])
@@ -138,13 +133,14 @@ def get_files_in_group(snapshot_filename):
     if not group_name:
         return jsonify({'error': 'Group name is required'}), 400
 
-    if snapshot_filename not in loaded_snapshots:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    group_data = loaded_snapshots.get(snapshot_filename, {})['groups'].get(group_name, {'f': set(), 'd': set()})
-
-    files = list(group_data.get('f', set()))
-    dirs = list(group_data.get('d', set()))
+        group_data = entry['groups'].get(group_name, {'f': set(), 'd': set()})
+        files = sorted(group_data.get('f', set()))
+        dirs = sorted(group_data.get('d', set()))
 
     return jsonify({
         'group_name': group_name,
@@ -152,17 +148,10 @@ def get_files_in_group(snapshot_filename):
         'dirs': dirs
     })
 
+
 def save_group_action(snapshot_filename, path, item_type, group_name, action_type):
-    """Save a group action to file"""
-    config = Config()
-    snapshot_dir = os.path.join(config.data_path, 'snapshots')
-
-    # Create the groups filename based on the snapshot filename
-    base_name = snapshot_filename.replace('.jsonl.gz', '')
-    groups_filename = f"{base_name}_groups.jl"
-    groups_filepath = os.path.join(snapshot_dir, groups_filename)
-
+    """Append a group action to the snapshot's group log"""
     action = [path, item_type, group_name, action_type, int(datetime.now().timestamp())]
 
-    with open(groups_filepath, 'a', encoding='utf-8') as f:
+    with open(groups_path(snapshot_filename), 'a', encoding='utf-8') as f:
         f.write(json.dumps(action) + '\n')

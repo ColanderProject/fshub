@@ -1,157 +1,279 @@
-"""Hash management API endpoints for calculating file hashes"""
+"""Hash management API endpoints for calculating file hashes."""
 
-from flask import Blueprint, request, jsonify
-import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
+import os
 import threading
-import queue
-from datetime import datetime
-from ..config import Config
-from .explorer import loaded_snapshots
-from ..utils import join_snapshot_path
+import time
+import uuid
+
+from flask import Blueprint, jsonify
+
+from . import json_body, validate_group_filters
+from .explorer import get_filtered_files, loaded_snapshots, snapshots_lock
 
 hash_bp = Blueprint('hash_bp', __name__)
 
-# Thread pool for hash calculation
-hash_queue = queue.Queue()
-hash_workers = []
-hash_active = True
+ALLOWED_ALGORITHMS = {'md5', 'sha1', 'sha256', 'sha512', 'blake2b'}
+MAX_WORKERS = 4
+MAX_FINISHED_TASKS = 50
+CHUNK_SIZE = 1024 * 1024
+FINISHED = ('completed', 'error')
 
+# One pool for the whole process. A pool per request would let a handful of
+# concurrent callers start an unbounded number of readers and saturate disks.
+_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix='fshub-hash')
 
-def hash_worker():
-    """Worker thread for calculating file hashes"""
-    while hash_active:
-        try:
-            task = hash_queue.get(timeout=1)
-            if task is None:
-                break
-                
-            file_path, result_callback = task
-            file_hash = calculate_file_hash(file_path)
-            
-            # Call the result callback with the result
-            if result_callback:
-                result_callback(file_path, file_hash)
-                
-            hash_queue.task_done()
-        except queue.Empty:
-            continue
-
-
-# Start worker threads
-for i in range(4):  # 4 worker threads
-    t = threading.Thread(target=hash_worker)
-    t.daemon = True
-    t.start()
-    hash_workers.append(t)
+# Hashing a large snapshot can take hours, so requests create background tasks
+# rather than occupying a Flask worker until all files have been read.
+hash_tasks = {}
+hash_lock = threading.Lock()
 
 
 def calculate_file_hash(file_path, algorithm='sha256'):
-    """Calculate the hash of a file"""
-    hash_func = hashlib.new(algorithm)
+    """Calculate a hash, returning ``(hex_digest, error_message)``."""
+    try:
+        hash_func = hashlib.new(algorithm)
+    except ValueError:
+        return None, f'Unsupported algorithm: {algorithm}'
+
     try:
         with open(file_path, 'rb') as f:
-            # Read the file in chunks to handle large files efficiently
-            for chunk in iter(lambda: f.read(8192), b""):
+            for chunk in iter(lambda: f.read(CHUNK_SIZE), b''):
                 hash_func.update(chunk)
-        return hash_func.hexdigest()
-    except Exception as e:
-        return None  # Return None if file can't be read
+    except OSError as e:
+        return None, str(e)
+
+    return hash_func.hexdigest(), None
+
+
+def _safe_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
+def _hash_files(file_paths, algorithm):
+    """Hash paths with at most ``MAX_WORKERS`` futures queued per task."""
+    results = []
+    errors = []
+    paths = iter(enumerate(file_paths))
+    pending = {}
+
+    def work(path):
+        return path, calculate_file_hash(path, algorithm)
+
+    def submit_one():
+        try:
+            index, path = next(paths)
+        except StopIteration:
+            return False
+        pending[_pool.submit(work, path)] = index
+        return True
+
+    for _ in range(MAX_WORKERS):
+        if not submit_one():
+            break
+
+    while pending:
+        done, _not_done = wait(tuple(pending), return_when=FIRST_COMPLETED)
+        for future in done:
+            index = pending.pop(future)
+            path, (file_hash, error) = future.result()
+            if error:
+                errors.append((index, {'file_path': path, 'error': error}))
+            else:
+                results.append((index, {
+                    'file_path': path,
+                    'hash': file_hash,
+                    'algorithm': algorithm,
+                    'size': _safe_size(path),
+                }))
+            submit_one()
+
+    # Completion order depends on file size; retain snapshot listing order in
+    # the API response without retaining millions of queued Future objects.
+    results.sort(key=lambda item: item[0])
+    errors.sort(key=lambda item: item[0])
+    return [item for _index, item in results], [item for _index, item in errors]
+
+
+def _validate_request(data):
+    """Validate common request fields, returning an error tuple or None."""
+    snapshot_filename = data.get('snapshot_filename', '')
+    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+        return 'Snapshot filename is required', 400
+
+    algorithm = data.get('algorithm', 'sha256')
+    if not isinstance(algorithm, str) or algorithm not in ALLOWED_ALGORITHMS:
+        return f'Unsupported algorithm: {algorithm}', 400
+
+    filter_error = validate_group_filters(
+        data.get('filter_in', []), data.get('filter_out', []),
+    )
+    if filter_error:
+        return filter_error, 400
+
+    with snapshots_lock:
+        if snapshot_filename not in loaded_snapshots:
+            return f'Snapshot not loaded: {snapshot_filename}', 400
+
+    return None
+
+
+def _collect_files(data):
+    """Resolve a validated request into local paths to hash."""
+    files = get_filtered_files(
+        data['snapshot_filename'],
+        data.get('filter_in', []),
+        data.get('filter_out', []),
+    )
+    return [item['full_path'] for item in files]
+
+
+def _prune_finished_tasks():
+    finished = [
+        (task['start_time'], task_id)
+        for task_id, task in hash_tasks.items()
+        if task['status'] in FINISHED
+    ]
+    if len(finished) <= MAX_FINISHED_TASKS:
+        return
+    finished.sort()
+    for _started, task_id in finished[:len(finished) - MAX_FINISHED_TASKS]:
+        hash_tasks.pop(task_id, None)
+
+
+def _create_task(kind, algorithm):
+    task_id = str(uuid.uuid4())
+    with hash_lock:
+        _prune_finished_tasks()
+        hash_tasks[task_id] = {
+            'kind': kind,
+            'algorithm': algorithm,
+            'status': 'started',
+            'start_time': time.time(),
+            'error': None,
+            'result': None,
+        }
+    return task_id
+
+
+def _update_task(task_id, **fields):
+    with hash_lock:
+        task = hash_tasks.get(task_id)
+        if task is not None:
+            task.update(fields)
+
+
+def _calculate_result(file_paths, algorithm):
+    if not file_paths:
+        raise ValueError('No files to process with the given filters')
+
+    results, errors = _hash_files(file_paths, algorithm)
+    return {
+        'success': True,
+        'algorithm': algorithm,
+        'files_processed': len(results),
+        'files_failed': len(errors),
+        'results': results,
+        'errors': errors,
+    }
+
+
+def _duplicates_result(file_paths, algorithm):
+    by_size = {}
+    errors = []
+    for path in file_paths:
+        size = _safe_size(path)
+        if size is None:
+            errors.append({'file_path': path, 'error': 'Could not read file size'})
+            continue
+        by_size.setdefault(size, []).append(path)
+
+    candidates = [path for paths in by_size.values() if len(paths) > 1 for path in paths]
+    results, hash_errors = _hash_files(candidates, algorithm) if candidates else ([], [])
+    errors.extend(hash_errors)
+
+    by_hash = {}
+    for item in results:
+        by_hash.setdefault(item['hash'], []).append(item)
+
+    duplicates = [
+        {
+            'hash': file_hash,
+            'size': items[0]['size'],
+            'count': len(items),
+            'files': [item['file_path'] for item in items],
+        }
+        for file_hash, items in by_hash.items()
+        if len(items) > 1
+    ]
+    duplicates.sort(key=lambda item: (item['size'] or 0) * item['count'], reverse=True)
+
+    return {
+        'duplicates': duplicates,
+        'algorithm': algorithm,
+        'files_compared': len(candidates),
+        'files_skipped': len(errors),
+        'errors': errors,
+    }
+
+
+def _run_task(task_id, data, result_builder):
+    _update_task(task_id, status='running')
+    try:
+        file_paths = _collect_files(data)
+        result = result_builder(file_paths, data.get('algorithm', 'sha256'))
+    except Exception as e:  # noqa: BLE001 - the error is exposed via task status
+        _update_task(task_id, status='error', error=str(e))
+        return
+    _update_task(task_id, status='completed', result=result)
+
+
+def _start_task(data, kind, result_builder):
+    error = _validate_request(data)
+    if error:
+        message, status = error
+        return jsonify({'error': message}), status
+
+    # Copy mutable lists before handing the request to another thread.
+    task_data = dict(data)
+    task_data['filter_in'] = list(data.get('filter_in', []))
+    task_data['filter_out'] = list(data.get('filter_out', []))
+    task_id = _create_task(kind, data.get('algorithm', 'sha256'))
+    threading.Thread(
+        target=_run_task,
+        args=(task_id, task_data, result_builder),
+        daemon=True,
+    ).start()
+
+    return jsonify({
+        'success': True,
+        'task_id': task_id,
+        'status': 'started',
+    }), 202
 
 
 @hash_bp.route('/api/v1/hash/calculate', methods=['POST'])
 def start_hash_calculation():
-    """Start calculating hashes for files based on filters"""
-    data = request.get_json()
-    snapshot_filename = data.get('snapshot_filename', '')
-    filter_in = data.get('filter_in', [])
-    filter_out = data.get('filter_out', [])
-    algorithm = data.get('algorithm', 'sha256')
-    
-    if not snapshot_filename:
-        return jsonify({'error': 'Snapshot filename is required'}), 400
-    
-    # Get filtered files from the snapshot
-    from .search import loaded_snapshots, load_snapshot
-    
-    if snapshot_filename not in loaded_snapshots:
-        if not load_snapshot(snapshot_filename):
-            return jsonify({'error': f'Cannot load snapshot: {snapshot_filename}'}), 400
-    
-    snapshot_data = loaded_snapshots[snapshot_filename]['data']
-    groups_dict = loaded_snapshots[snapshot_filename]['groups']
-    
-    # Get OS from the first snapshot object for path joining
-    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
-    
-    # Collect files to hash based on filters
-    files_to_process = []
-    
-    for path_obj in snapshot_data:
-        current_path = path_obj['p']
-        
-        # Process files
-        for i, filename in enumerate(path_obj.get('f', [])):
-            file_path = join_snapshot_path(current_path, filename, snapshot_os=snapshot_os)
-            full_path = f"f:{file_path}"
-            
-            # Check if file should be filtered out
-            should_filter_out = False
-            for group_name in filter_out:
-                if group_name in groups_dict and full_path in groups_dict[group_name]:
-                    should_filter_out = True
-                    break
-            
-            if should_filter_out:
-                continue
-            
-            # If filter_in is specified, only include files in those groups
-            if filter_in:
-                should_include = False
-                for group_name in filter_in:
-                    if group_name in groups_dict and full_path in groups_dict[group_name]:
-                        should_include = True
-                        break
-                if not should_include:
-                    continue
-            
-            # Add file to process list
-            files_to_process.append(file_path)
-    
-    if not files_to_process:
-        return jsonify({'error': 'No files to process with the given filters'}), 400
-    
-    # Add files to hash queue
-    results = []
-    for file_path in files_to_process:
-        # In a real implementation, we would queue the actual file path to be hashed
-        # For this implementation, I'll calculate the hash directly
-        file_hash = calculate_file_hash(file_path, algorithm)
-        if file_hash:
-            results.append({
-                'file_path': file_path,
-                'hash': file_hash,
-                'algorithm': algorithm
-            })
-    
-    return jsonify({
-        'success': True,
-        'files_processed': len(results),
-        'results': results
-    })
+    """Start hashing the files selected by the group filters."""
+    return _start_task(json_body(), 'calculate', _calculate_result)
 
 
-@hash_bp.route('/api/v1/hash/duplicates', methods=['GET'])
+@hash_bp.route('/api/v1/hash/duplicates', methods=['POST'])
 def find_duplicates():
-    """Find duplicate files by comparing hashes"""
-    snapshot_filename = request.args.get('snapshot', '')
-    
-    if not snapshot_filename:
-        return jsonify({'error': 'Snapshot filename is required'}), 400
-    
-    # This would involve calculating or retrieving hashes for all files in the snapshot
-    # and then comparing them to identify duplicates
-    # For now, this is a placeholder implementation
-    return jsonify({
-        'duplicates': []  # In a real implementation, this would contain duplicate file groups
-    })
+    """Start duplicate detection over the filtered file set."""
+    return _start_task(json_body(), 'duplicates', _duplicates_result)
+
+
+@hash_bp.route('/api/v1/hash/status/<task_id>', methods=['GET'])
+def get_hash_status(task_id):
+    """Return progress/final output for a hash task."""
+    with hash_lock:
+        task = hash_tasks.get(task_id)
+        if task is None:
+            return jsonify({'error': 'Task not found'}), 404
+        payload = dict(task)
+    return jsonify(payload)

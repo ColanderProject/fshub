@@ -1,85 +1,202 @@
 """Device management API endpoints"""
 
-from flask import Blueprint, request, jsonify
-import os
 import json
-import socket
-from ..config import Config
-from ..utils import get_system_info
+import os
+import threading
+import time
+
+from flask import Blueprint, jsonify
+
+from ..config import get_config
+from ..utils import UnsafePathError, encode_name_component, get_system_info, safe_join
+from . import json_body
 
 device_bp = Blueprint('device_bp', __name__)
 
-# Global variable to store loaded devices
-loaded_devices = {}
-current_device = None
+DEVICE_PREFIX = 'devices_'
+MEDIA_PREFIX = 'media_'
+DEVICE_SUFFIX = '.jl'
+
+_stamp_lock = threading.Lock()
+_last_stamp = 0.0
+
+
+def _next_stamp():
+    """A strictly increasing write stamp.
+
+    Deduplication needs a total order over device records. The wall clock
+    alone is not enough: on Windows time.time() only ticks every ~15 ms, so
+    two quick updates share a stamp and the tie-break falls back to file
+    name order, which says nothing about recency.
+    """
+    global _last_stamp
+    with _stamp_lock:
+        now = time.time()
+        if now <= _last_stamp:
+            now = _last_stamp + 1e-6
+        _last_stamp = now
+        return now
+
+
+def _legacy_file(hostname, prefix):
+    """The pre-encoding file name, or None when it never could have been one."""
+    if hostname in ('.', '..') or any(sep and sep in hostname
+                                      for sep in (os.sep, os.altsep)):
+        return None
+    return os.path.join(get_config().devices_dir, f'{prefix}{hostname}{DEVICE_SUFFIX}')
+
+
+def _device_file(hostname, prefix):
+    """Resolve a per-host data file, refusing anything that escapes the dir.
+
+    The host name is percent-encoded rather than rejected: names such as
+    "Ann's MacBook Pro" or "办公室-PC" are perfectly normal and must stay
+    registrable. Plain ASCII names encode to themselves, so files written by
+    earlier versions keep being found; the ones that do not are migrated to
+    the encoded name on first use.
+    """
+    encoded = encode_name_component(hostname, what='host name')
+    path = safe_join(get_config().devices_dir,
+                     f'{prefix}{encoded}{DEVICE_SUFFIX}', what='host name')
+
+    if encoded != hostname and not os.path.exists(path):
+        legacy = _legacy_file(hostname, prefix)
+        if legacy and os.path.exists(legacy):
+            os.replace(legacy, path)
+
+    return path
+
+
+def _read_jl(path):
+    records = []
+    if not os.path.exists(path):
+        return records
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+    return records
+
+
+def _load_all_devices():
+    """Yield (ordering_key, device) for every stored device record.
+
+    The ordering key is (updated_at, file mtime, line number) so that records
+    written before updated_at existed still fall back to something sensible
+    rather than to file name order. Records that are not objects, or whose
+    updated_at is not a number, must not break the whole endpoint.
+    """
+    devices_dir = get_config().devices_dir
+    try:
+        entries = os.listdir(devices_dir)
+    except OSError:
+        return []
+
+    all_devices = []
+    for name in sorted(entries):
+        if not (name.startswith(DEVICE_PREFIX) and name.endswith(DEVICE_SUFFIX)):
+            continue
+        path = os.path.join(devices_dir, name)
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = 0
+        for line_no, device in enumerate(_read_jl(path)):
+            if not isinstance(device, dict):
+                continue
+            updated_at = device.get('updated_at', 0)
+            if isinstance(updated_at, bool) or not isinstance(updated_at, (int, float)):
+                updated_at = 0
+            all_devices.append(((updated_at, mtime, line_no), device))
+    return all_devices
+
+
+def _device_key(device):
+    """Identify a device by thumbprint, falling back to host name.
+
+    Returns None for records that carry no usable identity, so a malformed
+    file written by an older build cannot break the whole endpoint.
+    """
+    for candidate in (device.get('thumbprint'), device.get('host_name')):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
 
 
 @device_bp.route('/api/v1/devices', methods=['GET'])
 def get_devices():
     """Get all devices"""
-    config = Config()
-    devices_dir = os.path.join(config.data_path, 'devices')
-    
-    # Load all device files
-    device_files = [f for f in os.listdir(devices_dir) if f.startswith('devices_') and f.endswith('.jl')]
-    
-    all_devices = []
-    for file in device_files:
-        filepath = os.path.join(devices_dir, file)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            for line in f:
-                if line.strip():
-                    device = json.loads(line)
-                    all_devices.append(device)
-    
-    # Check if current device is in the list
-    current_hostname = socket.gethostname()
-    current_device_exists = any(device.get('host_name') == current_hostname for device in all_devices)
-    
+    # Records for one device may live in several files (host_name can change
+    # while the thumbprint stays put), so file order says nothing about
+    # recency. Keep the record with the highest ordering key instead.
+    best = {}
+    for order, device in _load_all_devices():
+        key = _device_key(device)
+        if key is None:
+            continue
+        if key not in best or order > best[key][0]:
+            best[key] = (order, device)
+
+    current_info = get_system_info()
+    current_known = _device_key(current_info) in best
+
     return jsonify({
-        'devices': all_devices,
-        'current_device_known': current_device_exists,
-        'current_device_info': get_system_info()
+        'devices': [device for _order, device in best.values()],
+        'current_device_known': current_known,
+        'current_device_info': current_info
     })
 
 
 @device_bp.route('/api/v1/devices', methods=['POST'])
 def add_device():
-    """Add a new device"""
-    config = Config()
-    device = request.get_json()
-    
-    device_file = f"devices_{device['host_name']}.jl"
-    devices_path = os.path.join(config.data_path, 'devices', device_file)
-    
+    """Add or update a device"""
+    device = json_body()
+
+    hostname = device.get('host_name')
+    if not isinstance(hostname, str) or not hostname:
+        return jsonify({'error': 'host_name must be a non-empty string'}), 400
+
+    # A non-string thumbprint would later be used as a dict key and break
+    # every read of this endpoint, permanently: the bad record is durable.
+    thumbprint = device.get('thumbprint')
+    if thumbprint is not None and (not isinstance(thumbprint, str) or not thumbprint):
+        return jsonify({'error': 'thumbprint must be a non-empty string'}), 400
+
+    media = device.get('media')
+    if media is not None and not isinstance(media, list):
+        return jsonify({'error': 'media must be a list'}), 400
+
+    try:
+        devices_path = _device_file(hostname, DEVICE_PREFIX)
+        media_path = _device_file(hostname, MEDIA_PREFIX)
+    except UnsafePathError as e:
+        return jsonify({'error': str(e)}), 400
+
+    media = device.pop('media', None)
+
+    # Stamped on write so deduplication has a reliable ordering key.
+    device['updated_at'] = _next_stamp()
+
     with open(devices_path, 'a', encoding='utf-8') as f:
         f.write(json.dumps(device) + '\n')
-    
-    # Also save media info if provided
-    if 'media' in device:
-        media_file = f"media_{device['host_name']}.jl"
-        media_path = os.path.join(config.data_path, 'devices', media_file)
+
+    if media is not None:
         with open(media_path, 'w', encoding='utf-8') as f:
-            for media in device['media']:
-                f.write(json.dumps(media) + '\n')
-    
+            for item in media:
+                f.write(json.dumps(item) + '\n')
+
     return jsonify({'success': True})
 
 
 @device_bp.route('/api/v1/device/<hostname>/media', methods=['GET'])
 def get_device_media(hostname):
     """Get media information for a specific device"""
-    config = Config()
-    media_file = f"media_{hostname}.jl"
-    media_path = os.path.join(config.data_path, 'devices', media_file)
-    
-    if not os.path.exists(media_path):
-        return jsonify({'media': []})
-    
-    media_list = []
-    with open(media_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if line.strip():
-                media_list.append(json.loads(line))
-    
-    return jsonify({'media': media_list})
+    try:
+        media_path = _device_file(hostname, MEDIA_PREFIX)
+    except UnsafePathError as e:
+        return jsonify({'error': str(e)}), 400
+
+    return jsonify({'media': _read_jl(media_path)})

@@ -1,11 +1,90 @@
 """Utility functions for fshub"""
 
+import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import uuid
+
+
+class UnsafePathError(ValueError):
+    """Raised when a user supplied name would escape its base directory."""
+
+
+# '%' is allowed so percent-encoded components (see encode_name_component)
+# stay valid; it can never be used to escape a directory.
+_SAFE_NAME_RE = re.compile(r'^[A-Za-z0-9._%-]+$')
+_SAFE_CHAR_RE = re.compile(r'[A-Za-z0-9._-]')
+
+# Keep generated file names well below the 255 byte limit of common file
+# systems, leaving room for the caller's prefix and suffix.
+MAX_NAME_LENGTH = 120
+
+
+def encode_name_component(value, what='name'):
+    """Turn arbitrary text into a safe, reversible-enough file name part.
+
+    Host names may legitimately contain spaces, quotes or non-ASCII
+    characters ("Ann's MacBook Pro", "办公室-PC"), so rejecting them would
+    make the device registry unusable on perfectly normal machines. Instead
+    every character outside the safe set is percent-encoded, which keeps the
+    mapping injective (distinct values never share a file) while guaranteeing
+    the result cannot escape its directory.
+    """
+    if not isinstance(value, str) or not value:
+        raise UnsafePathError(f'Invalid {what}: value is required')
+
+    encoded = ''.join(
+        ch if _SAFE_CHAR_RE.fullmatch(ch)
+        else ''.join(f'%{byte:02X}' for byte in ch.encode('utf-8'))
+        for ch in value
+    )
+
+    # '.'/'..' are valid host names but not valid file names, and an overly
+    # long name would fail at open() time; both fall back to a deterministic
+    # digest. The '%-' marker cannot appear in normal output (a '%' is only
+    # ever emitted as part of a '%XX' escape), so a fallback name can never
+    # collide with an ordinary one.
+    if encoded in ('.', '..') or len(encoded) > MAX_NAME_LENGTH:
+        digest = hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
+        encoded = encoded[: MAX_NAME_LENGTH - len(digest) - 2] + '%-' + digest
+
+    return encoded
+
+
+def sanitize_name(name, what='name'):
+    """Validate a user supplied file name component.
+
+    Only a conservative character set is allowed so the value can never be
+    used to escape its base directory.
+    """
+    if not name or not isinstance(name, str):
+        raise UnsafePathError(f'Invalid {what}: value is required')
+    if name in ('.', '..') or not _SAFE_NAME_RE.match(name):
+        raise UnsafePathError(f'Invalid {what}: {name!r}')
+    return name
+
+
+def safe_join(base_dir, *names, what='name'):
+    """Join validated name components onto base_dir, refusing to escape it."""
+    for name in names:
+        sanitize_name(name, what=what)
+    return ensure_within(base_dir, os.path.join(base_dir, *names), what=what)
+
+
+def ensure_within(base_dir, target_path, what='path'):
+    """Return the realpath of target_path, ensuring it stays under base_dir."""
+    base_real = os.path.realpath(base_dir)
+    candidate = os.path.realpath(target_path)
+
+    # rstrip so a filesystem root stays usable as a base: '/' + os.sep would
+    # be '//' and 'E:\\' + os.sep would be 'E:\\\\', matching nothing.
+    if candidate != base_real and not candidate.startswith(base_real.rstrip(os.sep) + os.sep):
+        raise UnsafePathError(f'Invalid {what}: path escapes {base_dir}')
+    return candidate
 
 
 def _get_linux_os_release():
@@ -151,8 +230,6 @@ def join_snapshot_path(base_path, *paths, snapshot_os=None):
     
     # Choose separator based on snapshot's OS
     if snapshot_os == 'Windows':
-        separator = '\\'
-        
         # Special case: Windows root "/" with drive letters
         if base_path == '/' and paths:
             # Check if the first path component is a drive letter (e.g., "C:")
@@ -175,12 +252,93 @@ def join_snapshot_path(base_path, *paths, snapshot_os=None):
             if path:
                 result = result.rstrip('\\') + '\\' + path.lstrip('\\/')
     else:
-        # Unix-like systems (Linux, Darwin, etc.)
-        separator = '/'
-        # Convert any backslashes to forward slashes
-        result = base_path.replace('\\', '/')
+        # Unix-like systems (Linux, Darwin, etc.). Backslashes are ordinary
+        # file name characters here, so they must be left alone: rewriting
+        # them would rename "a\b" to "a/b" and collide with a real "a/b".
+        result = base_path
         for path in paths:
             if path:
-                result = result.rstrip('/') + '/' + path.lstrip('\\/')
-    
+                result = result.rstrip('/') + '/' + path.lstrip('/')
+
     return result
+
+
+def detect_snapshot_os(path):
+    """Best-effort detection of the OS a snapshot path came from."""
+    if len(path) >= 2 and path[1] == ':':
+        return 'Windows'
+    if path.startswith('\\\\'):
+        return 'Windows'
+    return 'Linux'
+
+
+def snapshot_separator(snapshot_os):
+    """Return the path separator used by a snapshot's OS."""
+    return '\\' if snapshot_os == 'Windows' else '/'
+
+
+def snapshot_dirname(path, snapshot_os=None):
+    """Return the parent directory of a snapshot path, or None at the root.
+
+    The result is always a key that can appear in a snapshot index, which
+    means separators are preserved at a root: the parent of ``C:\\Users`` is
+    ``C:\\`` (not ``C:``) and the parent of ``/home`` is ``/``.
+    """
+    if snapshot_os is None:
+        snapshot_os = detect_snapshot_os(path)
+
+    separator = snapshot_separator(snapshot_os)
+
+    if snapshot_os == 'Windows':
+        # A bare drive root has no parent inside the snapshot itself.
+        if len(path.rstrip(separator)) <= 2 and path[1:2] == ':':
+            return None
+    elif path == separator:
+        return None
+
+    stripped = path.rstrip(separator)
+    idx = stripped.rfind(separator)
+    if idx < 0:
+        return None
+    if idx == 0:
+        # Direct child of the POSIX root.
+        return separator
+
+    parent = stripped[:idx]
+    # Keep the trailing separator on a Windows drive root so the result
+    # matches the indexed path: "C:\\Users" -> "C:\\", never "C:".
+    if snapshot_os == 'Windows' and len(parent) == 2 and parent[1] == ':':
+        return parent + separator
+    return parent
+
+
+def snapshot_relative_path(full_path, snapshot_os=None):
+    """Convert an absolute snapshot path into a safe *relative* POSIX path.
+
+    Used when mirroring files into a backup target so that neither Windows
+    drive letters nor leading separators can escape the target directory.
+    """
+    if snapshot_os is None:
+        snapshot_os = detect_snapshot_os(full_path)
+
+    # Backslashes are only separators on Windows; POSIX allows them inside
+    # file names, so touching them there would merge distinct files.
+    path = full_path.replace('\\', '/') if snapshot_os == 'Windows' else full_path
+
+    # Strip a Windows drive letter: "C:/Users/x" -> "C/Users/x"
+    if snapshot_os == 'Windows' and len(path) >= 2 and path[1] == ':':
+        path = path[0] + path[2:]
+
+    parts = []
+    for part in path.split('/'):
+        if not part or part == '.':
+            continue
+        if part == '..':
+            # Never allow traversal in a generated destination path.
+            continue
+        # Other components are kept verbatim: a trailing ':' is a legal
+        # POSIX file name character and stripping it would let two distinct
+        # sources collide on one destination.
+        parts.append(part)
+
+    return '/'.join(parts)
