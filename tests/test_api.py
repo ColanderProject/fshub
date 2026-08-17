@@ -151,6 +151,20 @@ def test_endpoints_reject_non_object_json(client):
         assert response.status_code == 400, url
 
 
+def test_snapshot_and_backup_fields_require_strings(client, scanned_snapshot, tmp_path):
+    for url in ('/api/v1/load_snapshot', '/api/v1/unload_snapshot'):
+        assert client.post(url, json={'filename': []}).status_code == 400
+
+    load(client, scanned_snapshot)
+    for payload in (
+        {'snapshot_filename': [], 'target_path': str(tmp_path / 'out')},
+        {'snapshot_filename': scanned_snapshot, 'target_path': []},
+        {'snapshot_filename': scanned_snapshot, 'target_path': str(tmp_path / 'out'),
+         'dry_run': 'false'},
+    ):
+        assert client.post('/api/v1/backup/folder', json=payload).status_code == 400
+
+
 def test_search_rejects_wrong_types(client):
     assert client.post('/api/v1/search', json={'query': 42}).status_code == 400
     assert client.post('/api/v1/search',
@@ -162,3 +176,37 @@ def test_scan_rejects_non_string_skip_paths(client, sample_tree):
                                                  'skip_paths': [123]})
     assert response.status_code == 400
     assert 'skip_paths' in response.get_json()['error']
+
+
+def test_scan_rejects_non_boolean_use_index(client, sample_tree):
+    response = client.post('/api/v1/scan', json={
+        'path': str(sample_tree),
+        'use_index': 'false',
+    })
+    assert response.status_code == 400
+    assert 'use_index' in response.get_json()['error']
+
+
+def test_filter_group_names_must_be_strings(client, scanned_snapshot, tmp_path):
+    load(client, scanned_snapshot)
+
+    response = client.get('/api/v1/getPath', query_string={
+        'snapshot': scanned_snapshot,
+        'index': 0,
+        'filter_in': json.dumps([{}]),
+    })
+    assert response.status_code == 400
+
+    response = client.post('/api/v1/backup/folder', json={
+        'snapshot_filename': scanned_snapshot,
+        'target_path': str(tmp_path / 'out'),
+        'filter_in': [{}],
+    })
+    assert response.status_code == 400
+
+    for value in (None, [{}], ['']):
+        response = client.post('/api/v1/hash/calculate', json={
+            'snapshot_filename': scanned_snapshot,
+            'filter_in': value,
+        })
+        assert response.status_code == 400, value

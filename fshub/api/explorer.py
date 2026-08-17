@@ -17,7 +17,7 @@ from ..utils import (
     safe_join,
     snapshot_dirname,
 )
-from . import json_body
+from . import json_body, validate_group_filters
 
 explorer_bp = Blueprint('explorer_bp', __name__)
 
@@ -57,9 +57,24 @@ def groups_path(snapshot_filename):
     )
 
 
+def _snapshot_view(snapshot_filename, copy_groups=False):
+    """Capture a stable snapshot entry for work performed outside the lock."""
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return None
+        groups = entry['groups']
+        if copy_groups:
+            groups = {
+                name: {'f': set(items.get('f', set())), 'd': set(items.get('d', set()))}
+                for name, items in groups.items()
+            }
+        return {'data': entry['data'], 'index': entry['index'], 'groups': groups}
+
+
 def get_snapshot_os(snapshot_filename):
     """Return the OS a snapshot was captured on, if known."""
-    entry = loaded_snapshots.get(snapshot_filename)
+    entry = _snapshot_view(snapshot_filename)
     if not entry or not entry['data']:
         return None
     return entry['data'][0].get('os_name')
@@ -106,14 +121,14 @@ def load_snapshot():
     data = json_body()
     snapshot_filename = data.get('filename', '')
 
-    if not snapshot_filename:
-        return jsonify({'error': 'Snapshot filename is required'}), 400
+    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+        return jsonify({'error': 'Snapshot filename must be a non-empty string'}), 400
 
     try:
         success = load_snapshot_file(snapshot_filename)
     except UnsafePathError as e:
         return jsonify({'error': str(e)}), 400
-    except (OSError, EOFError, ValueError, KeyError) as e:
+    except (OSError, EOFError, ValueError, TypeError, KeyError) as e:
         # Truncated, half-written or foreign files are a normal operator
         # mistake, not a server fault.
         return jsonify({'error': f'Invalid snapshot file: {e}'}), 400
@@ -133,6 +148,8 @@ def unload_snapshot():
     """Unload a snapshot from memory"""
     data = json_body()
     snapshot_filename = data.get('filename', '')
+    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+        return jsonify({'error': 'Snapshot filename must be a non-empty string'}), 400
 
     with snapshots_lock:
         if snapshot_filename in loaded_snapshots:
@@ -159,8 +176,9 @@ def get_path():
     except json.JSONDecodeError:
         return jsonify({'error': 'Invalid filter format'}), 400
 
-    if not isinstance(filter_in, list) or not isinstance(filter_out, list):
-        return jsonify({'error': 'Filters must be lists of group names'}), 400
+    filter_error = validate_group_filters(filter_in, filter_out)
+    if filter_error:
+        return jsonify({'error': filter_error}), 400
 
     if not snapshot_filename:
         return jsonify({'error': 'Snapshot filename is required'}), 400
@@ -169,14 +187,14 @@ def get_path():
     if path is not None and index is not None:
         return jsonify({'error': 'Cannot specify both path and index'}), 400
 
-    # One lookup, then work on that reference: a concurrent unload must not
-    # turn a read into a KeyError.
-    entry = loaded_snapshots.get(snapshot_filename)
+    # Capture one coherent view. Filtering also copies the mutable group sets,
+    # so concurrent group changes cannot alter this request halfway through.
+    entry = _snapshot_view(snapshot_filename, copy_groups=use_filter)
     if entry is None:
         return jsonify({'error': f'Snapshot not found: {snapshot_filename}'}), 400
 
     snapshot_data = entry['data']
-    snapshot_os = get_snapshot_os(snapshot_filename)
+    snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
 
     path_obj = None
     if path is not None:
@@ -193,8 +211,10 @@ def get_path():
 
     # Apply filters if requested
     if use_filter:
-        return jsonify(filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc))
-    return jsonify(format_path_content(path_obj, snapshot_filename))
+        return jsonify(filter_path_content(
+            path_obj, snapshot_filename, filter_in, filter_out, recursive_calc, entry=entry,
+        ))
+    return jsonify(format_path_content(path_obj, snapshot_filename, entry=entry))
 
 
 @explorer_bp.route('/api/v1/snapshots', methods=['GET'])
@@ -256,16 +276,23 @@ def _load_groups(snapshot_filename):
             if not line.strip():
                 continue
             try:
-                item_path, item_type, group_name, action_type, _ts = json.loads(line)
+                action = json.loads(line)
+                if not isinstance(action, list) or len(action) != 5:
+                    continue
+                item_path, item_type, group_name, action_type, _ts = action
+                if not isinstance(item_path, str) or not isinstance(group_name, str):
+                    continue
+                if not item_path or not group_name:
+                    continue
+                if item_type not in ('f', 'd') or action_type not in ('add', 'del'):
+                    continue
             except (ValueError, TypeError):
                 continue
 
             group = groups_dict.setdefault(group_name, {'f': set(), 'd': set()})
-            if item_type not in group:
-                continue
             if action_type == 'add':
                 group[item_type].add(item_path)
-            elif action_type == 'del':
+            else:
                 group[item_type].discard(item_path)
 
     return groups_dict
@@ -318,8 +345,25 @@ def _compute_recursive_totals(snapshot_data, path_index, snapshot_os):
         snapshot_data[parent_idx]['C'] += snapshot_data[idx]['C']
 
 
+def _validate_snapshot_record(record):
+    """Validate the structural fields used by the explorer."""
+    if not isinstance(record, dict) or not isinstance(record.get('p'), str):
+        raise ValueError('snapshot records must be objects with a string path')
+
+    for field in ('f', 'd'):
+        values = record.get(field, [])
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f'snapshot field {field!r} must be a list of strings')
+
+    for field in ('s', 't', 'T'):
+        if not isinstance(record.get(field, []), list):
+            raise ValueError(f'snapshot field {field!r} must be a list')
+
+    return record
+
+
 def _read_snapshot_records(snapshot_filename):
-    """Yield the path records of a snapshot, in either storage format."""
+    """Read the path records of a snapshot, in either storage format."""
     path = snapshot_path(snapshot_filename)
     if not os.path.exists(path):
         return None
@@ -329,7 +373,7 @@ def _read_snapshot_records(snapshot_filename):
         with gzip.open(path, 'rt', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
-                    records.append(json.loads(line))
+                    records.append(_validate_snapshot_record(json.loads(line)))
         return records
 
     base_name = snapshot_filename[: -len(INDEX_SUFFIX)]
@@ -348,8 +392,11 @@ def _read_snapshot_records(snapshot_filename):
             if not index_line or not data_line or not index_line.strip():
                 raise ValueError('index and data files do not match')
             record = json.loads(data_line)
-            record['p'] = json.loads(index_line)['p']
-            records.append(record)
+            index_record = json.loads(index_line)
+            if not isinstance(record, dict) or not isinstance(index_record, dict):
+                raise ValueError('index and data records must be objects')
+            record['p'] = index_record.get('p')
+            records.append(_validate_snapshot_record(record))
     return records
 
 
@@ -367,19 +414,21 @@ def load_snapshot_file(snapshot_filename):
     snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
     _compute_recursive_totals(snapshot_data, path_index, snapshot_os)
 
+    # Do disk I/O outside the global lock, then publish one complete entry.
+    groups = _load_groups(snapshot_filename)
     with snapshots_lock:
         loaded_snapshots[snapshot_filename] = {
             'data': snapshot_data,
             'index': path_index,
-            'groups': _load_groups(snapshot_filename),
+            'groups': groups,
         }
 
     return True
 
 
 def get_snapshot_info(snapshot_filename):
-    """Get information about a loaded snapshot"""
-    entry = loaded_snapshots.get(snapshot_filename)
+    """Get information about a loaded snapshot."""
+    entry = _snapshot_view(snapshot_filename)
     if entry is None:
         return None
 
@@ -441,12 +490,12 @@ def _apply_totals(dir_info, size, count):
     dir_info['file_count'] = count
 
 
-def format_path_content(path_obj, snapshot_filename):
-    """Format path content for API response"""
-    snapshot_os = get_snapshot_os(snapshot_filename)
-    entry = loaded_snapshots.get(snapshot_filename, {})
-    index = entry.get('index', {})
-    data = entry.get('data', [])
+def format_path_content(path_obj, snapshot_filename, entry=None):
+    """Format path content for API response."""
+    entry = entry or _snapshot_view(snapshot_filename) or EMPTY_SNAPSHOT
+    data = entry['data']
+    index = entry['index']
+    snapshot_os = data[0].get('os_name') if data else None
 
     files = [_file_entry(path_obj, i) for i in range(len(path_obj.get('f', [])))]
 
@@ -478,13 +527,14 @@ def _in_any_group(groups_dict, group_names, item_type, item_path):
     return False
 
 
-def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recursive_calc=False):
-    """Filter path content based on groups"""
-    entry = loaded_snapshots.get(snapshot_filename) or EMPTY_SNAPSHOT
+def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
+                        recursive_calc=False, entry=None):
+    """Filter path content based on groups."""
+    entry = entry or _snapshot_view(snapshot_filename, copy_groups=True) or EMPTY_SNAPSHOT
     groups_dict = entry['groups']
     index = entry['index']
     data = entry['data']
-    snapshot_os = get_snapshot_os(snapshot_filename)
+    snapshot_os = data[0].get('os_name') if data else None
 
     filtered_files = []
     for i, filename in enumerate(path_obj.get('f', [])):
@@ -513,7 +563,7 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out, recu
             subdir_obj = data[subdir_idx]
             if recursive_calc:
                 size, count = calculate_filtered_recursive_totals(
-                    subdir_obj, snapshot_filename, filter_in, filter_out
+                    subdir_obj, snapshot_filename, filter_in, filter_out, entry=entry,
                 )
                 _apply_totals(dir_info, size, count)
             else:
@@ -609,8 +659,9 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
     return total_size, total_count
 
 
-def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out):
-    entry = loaded_snapshots.get(snapshot_filename) or EMPTY_SNAPSHOT
+def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out,
+                                        entry=None):
+    entry = entry or _snapshot_view(snapshot_filename, copy_groups=True) or EMPTY_SNAPSHOT
     return filter_on_snapshot(
         path_obj, entry['data'], entry['index'],
         filter_in, filter_out, entry['groups'], None,
@@ -619,7 +670,7 @@ def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, 
 
 def get_filtered_files(snapshot_filename, filter_in, filter_out):
     """Get files from a snapshot that match the filter criteria"""
-    entry = loaded_snapshots.get(snapshot_filename)
+    entry = _snapshot_view(snapshot_filename, copy_groups=True)
     if not entry or not entry['data']:
         return []
 

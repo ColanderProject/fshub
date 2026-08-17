@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -18,7 +19,7 @@ from ..utils import (
     ensure_within,
     snapshot_relative_path,
 )
-from . import json_body
+from . import json_body, validate_group_filters
 from .explorer import get_filtered_files, get_snapshot_os, loaded_snapshots
 
 backup_bp = Blueprint('backup_bp', __name__)
@@ -32,6 +33,7 @@ MAX_FINISHED_TASKS = 50
 MAX_REPORTED_ERRORS = 20
 DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
 COPY_BUFFER = 1024 * 1024
+STAGE_MEMORY_LIMIT = 8 * COPY_BUFFER
 
 
 class BackupLog:
@@ -151,6 +153,13 @@ def _finish_task(task_id):
         task = backup_tasks.get(task_id)
         if task is None:
             return
+        # stop_backup_task() can win the lock after the last per-file check.
+        # Never overwrite its accepted stop request with a completed state.
+        if task['status'] == 'stopped':
+            task['status'] = 'cancelled'
+            task['current_file'] = None
+            return
+
         failed = task['failed_files']
         task['status'] = 'completed_with_errors' if failed else 'completed'
         task['progress'] = 100
@@ -190,8 +199,14 @@ def _prepare_backup(data, backup_type):
     snapshot_filename = data.get('snapshot_filename', '')
     target_path = data.get('target_path', '')
 
-    if not snapshot_filename or not target_path:
-        return None, ({'error': 'Snapshot filename and target path are required'}, 400)
+    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+        return None, ({'error': 'snapshot_filename must be a non-empty string'}, 400)
+    if not isinstance(target_path, str) or not target_path:
+        return None, ({'error': 'target_path must be a non-empty string'}, 400)
+
+    dry_run = data.get('dry_run', False)
+    if not isinstance(dry_run, bool):
+        return None, ({'error': 'dry_run must be a boolean'}, 400)
 
     if snapshot_filename not in loaded_snapshots:
         return None, ({'error': f'Snapshot not loaded: {snapshot_filename}'}, 400)
@@ -206,16 +221,18 @@ def _prepare_backup(data, backup_type):
 
     filter_in = data.get('filter_in', [])
     filter_out = data.get('filter_out', [])
-    if not isinstance(filter_in, list) or not isinstance(filter_out, list):
-        return None, ({'error': 'Filters must be lists of group names'}, 400)
+    filter_error = validate_group_filters(filter_in, filter_out)
+    if filter_error:
+        return None, ({'error': filter_error}, 400)
 
+    snapshot_os = get_snapshot_os(snapshot_filename)
     files_to_backup = get_filtered_files(snapshot_filename, filter_in, filter_out)
     if not files_to_backup:
         return None, ({'error': 'No files to backup with the given filters'}, 400)
 
     return {
         'snapshot_filename': snapshot_filename,
-        'snapshot_os': get_snapshot_os(snapshot_filename),
+        'snapshot_os': snapshot_os,
         'target_path': os.path.realpath(target_path),
         'files': files_to_backup,
         'meta': {
@@ -394,10 +411,19 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                     # entry can never point outside the archive root.
                     arcname = snapshot_relative_path(source_path, snapshot_os)
 
+                    # Read the complete source before opening a ZIP member. If
+                    # the source fails halfway through, zipfile would otherwise
+                    # finalize and expose that truncated member under its real
+                    # name. Small files stay in memory; large ones spill to a
+                    # temporary file.
                     try:
-                        with open(source_path, 'rb') as src:
+                        with tempfile.SpooledTemporaryFile(
+                                max_size=STAGE_MEMORY_LIMIT, mode='w+b') as staged:
+                            with open(source_path, 'rb') as src:
+                                shutil.copyfileobj(src, staged, COPY_BUFFER)
+                            staged.seek(0)
                             with zipf.open(arcname, 'w') as dst:
-                                shutil.copyfileobj(src, dst, COPY_BUFFER)
+                                shutil.copyfileobj(staged, dst, COPY_BUFFER)
                     except OSError as e:
                         _record(task_id, log, source_path, zip_filename, file_size, e)
                         files_processed += 1

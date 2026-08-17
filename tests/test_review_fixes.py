@@ -2,11 +2,10 @@
 
 import os
 import sys
-import time
 
 import pytest
 
-from conftest import select_all_files, wait_for_task, write_snapshot
+from conftest import select_all_files, wait_for_hash_task, wait_for_task, write_snapshot
 
 from fshub.api.explorer import get_filtered_files, load_snapshot_file, loaded_snapshots
 from fshub.utils import snapshot_relative_path
@@ -52,12 +51,9 @@ def test_folder_backup_refuses_symlinked_destination(client, scanned_snapshot,
         'filter_in': ['one'],
     })
     task_id = response.get_json()['task_id']
-    for _ in range(200):
-        status = client.get(f'/api/v1/backup/status/{task_id}').get_json()
-        if status['status'] in ('completed', 'error', 'cancelled'):
-            break
-        time.sleep(0.02)
+    status = wait_for_task(client, task_id)
 
+    assert status['status'] == 'completed_with_errors'
     assert outside.read_text() == 'untouched'
 
 
@@ -104,8 +100,9 @@ def test_empty_files_are_reported_as_duplicates(client, config, tmp_path):
     snapshot = run_scan_to_snapshot(str(tree))['result_file']
     client.post('/api/v1/load_snapshot', json={'filename': snapshot})
 
-    data = client.post('/api/v1/hash/duplicates', json={
-        'snapshot_filename': snapshot}).get_json()
+    response = client.post('/api/v1/hash/duplicates', json={
+        'snapshot_filename': snapshot})
+    data = wait_for_hash_task(client, response.get_json()['task_id'])['result']
 
     assert len(data['duplicates']) == 1
     assert data['duplicates'][0]['count'] == 2
@@ -305,8 +302,9 @@ def test_hashing_reads_a_backslash_name(client, config, tmp_path):
     snapshot = run_scan_to_snapshot(str(tree))['result_file']
     client.post('/api/v1/load_snapshot', json={'filename': snapshot})
 
-    data = client.post('/api/v1/hash/calculate',
-                       json={'snapshot_filename': snapshot}).get_json()
+    response = client.post('/api/v1/hash/calculate',
+                           json={'snapshot_filename': snapshot})
+    data = wait_for_hash_task(client, response.get_json()['task_id'])['result']
     assert data['files_processed'] == 1
     assert data['files_failed'] == 0
 

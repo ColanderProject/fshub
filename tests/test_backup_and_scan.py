@@ -6,10 +6,11 @@ import time
 
 import pytest
 
-from conftest import select_all_files, wait_for_task
+from conftest import select_all_files, wait_for_hash_task, wait_for_task
 
 from fshub import scanning
 from fshub.api import backup as backup_module
+from fshub.api import hashes as hashes_module
 from fshub.scanning import is_related_path, run_scan_to_snapshot
 
 
@@ -72,6 +73,19 @@ def test_scan_skip_prefix_tolerates_trailing_separator(config, sample_tree):
 def test_scan_endpoint_rejects_bad_input(client):
     assert client.post('/api/v1/scan', json={'path': '/definitely/not/here'}).status_code == 400
     assert client.post('/api/v1/scan', json={'path': '', 'skip_paths': 'x'}).status_code == 400
+
+
+def test_cli_scan_rejects_a_file(tmp_path):
+    from click.testing import CliRunner
+
+    from fshub.main import cli
+
+    source_file = tmp_path / 'file.txt'
+    source_file.write_text('not a directory')
+    result = CliRunner().invoke(cli, ['scan', str(source_file)])
+
+    assert result.exit_code != 0
+    assert 'Not a directory' in result.output
 
 
 def test_scan_endpoint_reports_status(client, sample_tree):
@@ -187,20 +201,23 @@ def test_hash_calculate_and_duplicates(client, scanned_snapshot, sample_tree):
     client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
-    data = client.post('/api/v1/hash/calculate', json={
+    response = client.post('/api/v1/hash/calculate', json={
         'snapshot_filename': scanned_snapshot,
         'filter_in': ['all'],
-    }).get_json()
+    })
+    assert response.status_code == 202
+    data = wait_for_hash_task(client, response.get_json()['task_id'])['result']
 
     assert data['files_processed'] == 3
     assert data['files_failed'] == 0
     assert all(len(item['hash']) == 64 for item in data['results'])
 
     # Distinct contents and sizes, so no duplicates.
-    dupes = client.post('/api/v1/hash/duplicates', json={
+    response = client.post('/api/v1/hash/duplicates', json={
         'snapshot_filename': scanned_snapshot,
         'filter_in': ['all'],
-    }).get_json()
+    })
+    dupes = wait_for_hash_task(client, response.get_json()['task_id'])['result']
     assert dupes['duplicates'] == []
 
 
@@ -211,6 +228,7 @@ def test_hash_rejects_unknown_algorithm(client, scanned_snapshot):
         'algorithm': 'rot13',
     })
     assert response.status_code == 400
+    assert client.get('/api/v1/hash/status/not-a-task').status_code == 404
 
 
 def _select_and_backup(client, snapshot, tree, target, backup_type='folder', **extra):
@@ -248,6 +266,19 @@ def test_backup_of_a_stale_snapshot_reports_failures(client, scanned_snapshot, s
     assert status['errors'] and 'a.txt' in status['errors'][0]['path']
 
 
+def test_stop_after_the_last_file_is_not_overwritten_by_finish(client):
+    """An accepted late stop must finalize as cancelled, not completed."""
+    task_id = backup_module._create_task(1)
+    backup_module._update_task(task_id, status='running', completed_files=1, progress=100)
+
+    response = client.post(f'/api/v1/backup/stop/{task_id}')
+    assert response.get_json()['success'] is True
+
+    backup_module._finish_task(task_id)
+    status = client.get(f'/api/v1/backup/status/{task_id}').get_json()
+    assert status['status'] == 'cancelled'
+
+
 def test_stop_before_the_worker_starts_is_not_lost(client, scanned_snapshot, sample_tree,
                                                    tmp_path, monkeypatch):
     """A stop that arrives before the thread runs must cancel the backup."""
@@ -276,6 +307,93 @@ def test_stop_before_the_worker_starts_is_not_lost(client, scanned_snapshot, sam
     assert status['status'] == 'cancelled'
     assert status['completed_files'] == 0
     assert list(target.rglob('*.txt')) == []
+
+
+def test_zip_source_read_failure_leaves_no_partial_member(
+        client, scanned_snapshot, sample_tree, tmp_path, monkeypatch):
+    """A source that fails halfway must not leave a restorable truncated file."""
+    import zipfile
+
+    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    select_all_files(client, scanned_snapshot, sample_tree)
+    failing_path = os.path.join(str(sample_tree), 'a.txt')
+    real_open = open
+
+    class FailingReader:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.read_count = 0
+
+        def read(self, _size=-1):
+            if self.read_count:
+                raise OSError('simulated source read failure')
+            self.read_count += 1
+            return self.wrapped.read(3)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.wrapped.close()
+
+    def failing_open(path, mode='r', *args, **kwargs):
+        opened = real_open(path, mode, *args, **kwargs)
+        if os.fspath(path) == failing_path and mode == 'rb':
+            return FailingReader(opened)
+        return opened
+
+    monkeypatch.setattr(backup_module, 'open', failing_open, raising=False)
+    target = tmp_path / 'zips'
+    response = client.post('/api/v1/backup/zip', json={
+        'snapshot_filename': scanned_snapshot,
+        'target_path': str(target),
+        'filter_in': ['all'],
+    })
+    status = wait_for_task(client, response.get_json()['task_id'])
+
+    assert status['status'] == 'completed_with_errors'
+    members = []
+    for archive in target.glob('*.zip'):
+        with zipfile.ZipFile(archive) as zf:
+            members.extend(zf.namelist())
+    assert not any(name.endswith('/a.txt') or name == 'a.txt' for name in members)
+    assert len(members) == 2
+
+
+def test_hash_submission_is_bounded(monkeypatch):
+    """A huge hash task must not eagerly queue one Future per file."""
+    from concurrent.futures import Future
+
+    class TrackingFuture(Future):
+        def __init__(self, owner, value):
+            super().__init__()
+            self.owner = owner
+            self.set_result(value)
+
+        def result(self, *args, **kwargs):
+            self.owner.outstanding -= 1
+            return super().result(*args, **kwargs)
+
+    class TrackingPool:
+        def __init__(self):
+            self.outstanding = 0
+            self.maximum = 0
+
+        def submit(self, _function, path):
+            self.outstanding += 1
+            self.maximum = max(self.maximum, self.outstanding)
+            return TrackingFuture(self, (path, ('digest', None)))
+
+    pool = TrackingPool()
+    monkeypatch.setattr(hashes_module, '_pool', pool)
+
+    results, errors = hashes_module._hash_files(
+        [f'file-{i}' for i in range(1000)], 'sha256',
+    )
+
+    assert errors == []
+    assert len(results) == 1000
+    assert pool.maximum <= hashes_module.MAX_WORKERS
 
 
 def test_backup_name_with_spaces_is_accepted(client, config, scanned_snapshot, sample_tree,
@@ -321,6 +439,9 @@ def test_two_scans_in_the_same_second_get_separate_snapshots(config, sample_tree
 def test_symlinked_scan_paths_are_treated_as_one_tree(client, sample_tree, tmp_path):
     """Two aliases of the same directory must not be scanned concurrently."""
     alias = tmp_path / 'alias'
-    alias.symlink_to(sample_tree)
+    try:
+        alias.symlink_to(sample_tree, target_is_directory=True)
+    except OSError as e:
+        pytest.skip(f'symlinks are unavailable: {e}')
 
     assert is_related_path(str(alias), str(sample_tree)) is True

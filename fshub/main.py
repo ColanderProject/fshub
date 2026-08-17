@@ -95,8 +95,8 @@ def config_gen():
 )
 def scan(path, use_index, skip_paths):
     """Scan a directory and save a snapshot."""
-    if not (platform.system() == 'Windows' and path == '/') and not os.path.exists(path):
-        raise click.ClickException(f'Invalid path: {path}')
+    if not (platform.system() == 'Windows' and path == '/') and not os.path.isdir(path):
+        raise click.ClickException(f'Not a directory: {path}')
 
     for skip_path in skip_paths:
         if not skip_path:

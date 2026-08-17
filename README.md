@@ -96,6 +96,11 @@ second. A run that could not copy every selected file finishes as
 `completed_with_errors` and reports `failed_files`/`errors`; it never claims
 success.
 
+Hashing is also asynchronous so a large snapshot does not occupy a web
+worker. `POST /api/v1/hash/calculate` and `POST /api/v1/hash/duplicates`
+return HTTP 202 with a `task_id`; poll `/api/v1/hash/status/<task_id>` until
+its status is `completed` or `error`. Successful output is in `result`.
+
 ## Development
 
 ```bash

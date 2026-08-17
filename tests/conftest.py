@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fshub import config as config_module  # noqa: E402
 from fshub.api import backup as backup_module  # noqa: E402
+from fshub.api import hashes as hashes_module  # noqa: E402
 from fshub.api.explorer import loaded_snapshots  # noqa: E402
 from fshub.web import create_app  # noqa: E402
 
@@ -36,6 +37,7 @@ def app(config):
     yield application
     loaded_snapshots.clear()
     backup_module.backup_tasks.clear()
+    hashes_module.hash_tasks.clear()
 
 
 @pytest.fixture
@@ -81,6 +83,19 @@ def select_all_files(client, snapshot, tree, group_name='all'):
             'path': file_info['full_path'],
             'group_name': group_name,
         })
+
+
+def wait_for_hash_task(client, task_id, timeout=4.0):
+    """Block until a hash task has completed, returning its status."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.get(f'/api/v1/hash/status/{task_id}').get_json()
+        if status['status'] in hashes_module.FINISHED:
+            return status
+        time.sleep(0.02)
+    pytest.fail(f'hash task {task_id} did not finish within {timeout}s')
 
 
 def wait_for_task(client, task_id, timeout=4.0):

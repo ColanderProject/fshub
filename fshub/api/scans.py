@@ -43,8 +43,11 @@ def start_scan():
     """Start a scan of a directory"""
     data = json_body()
     scan_path = data.get('path', '')
-    skip_paths = data.get('skip_paths', []) or []
-    use_index = bool(data.get('use_index', False))
+    skip_paths = data.get('skip_paths', [])
+    use_index = data.get('use_index', False)
+
+    if not isinstance(use_index, bool):
+        return jsonify({'error': 'use_index must be a boolean'}), 400
 
     if not isinstance(skip_paths, list) or not all(
             isinstance(path, str) and path for path in skip_paths):

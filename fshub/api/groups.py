@@ -9,7 +9,6 @@ from ..utils import UnsafePathError
 from . import json_body
 from .explorer import (
     from_web_path,
-    get_snapshot_os,
     groups_path,
     loaded_snapshots,
     snapshots_lock,
@@ -35,12 +34,16 @@ def _read_group_request(snapshot_filename):
     if not item_path or not group_name:
         return None, None, ({'error': 'Path and group name are required'}, 400)
 
-    if snapshot_filename not in loaded_snapshots:
-        return None, None, ({'error': 'Snapshot not loaded'}, 400)
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return None, None, ({'error': 'Snapshot not loaded'}, 400)
+        data_rows = entry['data']
+        snapshot_os = data_rows[0].get('os_name') if data_rows else None
 
     # The UI navigates in web paths (/C:/Users), the snapshot is indexed by
     # native ones (C:\Users). Convert here so a group entry always matches.
-    item_path = from_web_path(item_path, get_snapshot_os(snapshot_filename))
+    item_path = from_web_path(item_path, snapshot_os)
 
     return item_path, group_name, None
 
@@ -79,22 +82,21 @@ def _mutate_group(snapshot_filename, item_type, action_type):
 @group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
 def get_groups(snapshot_filename):
     """Get all groups for a specific snapshot with file and directory counts"""
-    entry = loaded_snapshots.get(snapshot_filename)
-    if entry is None:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    groups_with_counts = []
-
-    for group_name, items in entry['groups'].items():
-        file_count = len(items.get('f', set()))
-        dir_count = len(items.get('d', set()))
-
-        groups_with_counts.append({
-            'name': group_name,
-            'file_count': file_count,
-            'dir_count': dir_count,
-            'total_count': file_count + dir_count
-        })
+        groups_with_counts = []
+        for group_name, items in entry['groups'].items():
+            file_count = len(items.get('f', set()))
+            dir_count = len(items.get('d', set()))
+            groups_with_counts.append({
+                'name': group_name,
+                'file_count': file_count,
+                'dir_count': dir_count,
+                'total_count': file_count + dir_count
+            })
 
     return jsonify({'groups': groups_with_counts})
 
@@ -131,16 +133,19 @@ def get_files_in_group(snapshot_filename):
     if not group_name:
         return jsonify({'error': 'Group name is required'}), 400
 
-    entry = loaded_snapshots.get(snapshot_filename)
-    if entry is None:
-        return jsonify({'error': 'Snapshot not loaded'}), 400
+    with snapshots_lock:
+        entry = loaded_snapshots.get(snapshot_filename)
+        if entry is None:
+            return jsonify({'error': 'Snapshot not loaded'}), 400
 
-    group_data = entry['groups'].get(group_name, {'f': set(), 'd': set()})
+        group_data = entry['groups'].get(group_name, {'f': set(), 'd': set()})
+        files = sorted(group_data.get('f', set()))
+        dirs = sorted(group_data.get('d', set()))
 
     return jsonify({
         'group_name': group_name,
-        'files': sorted(group_data.get('f', set())),
-        'dirs': sorted(group_data.get('d', set()))
+        'files': files,
+        'dirs': dirs
     })
 
 

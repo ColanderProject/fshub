@@ -169,3 +169,34 @@ def test_corrupt_snapshot_is_a_client_error(client, config):
 
     assert response.status_code == 400
     assert 'Invalid snapshot file' in response.get_json()['error']
+
+
+def test_non_object_snapshot_record_is_a_client_error(client, config):
+    """A JSON value of the wrong shape must not escape as a TypeError 500."""
+    import gzip
+    import json
+
+    name = 'snapshot_2_1.jsonl.gz'
+    with gzip.open(os.path.join(config.snapshot_dir, name), 'wt', encoding='utf-8') as f:
+        f.write(json.dumps(['not', 'an', 'object']) + '\n')
+
+    response = client.post('/api/v1/load_snapshot', json={'filename': name})
+    assert response.status_code == 400
+    assert name not in loaded_snapshots
+
+
+def test_malformed_group_records_are_ignored(client, config):
+    """Old or hand-edited group logs cannot poison snapshot loading."""
+    import json
+
+    name = 'snapshot_3_3.jsonl.gz'
+    write_snapshot(config, name, _windows_snapshot())
+    groups_path = os.path.join(config.snapshot_dir, 'snapshot_3_3_groups.jl')
+    with open(groups_path, 'w', encoding='utf-8') as f:
+        f.write(json.dumps(['/x', 'f', [], 'add', 0]) + '\n')
+        f.write(json.dumps([[], 'f', 'bad', 'add', 0]) + '\n')
+        f.write(json.dumps(['/x', 'wrong', 'bad', 'add', 0]) + '\n')
+
+    response = client.post('/api/v1/load_snapshot', json={'filename': name})
+    assert response.status_code == 200
+    assert loaded_snapshots[name]['groups'] == {}
