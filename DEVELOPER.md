@@ -55,7 +55,7 @@ What the application *is* responsible for:
 
 `fshub.config.get_config()` returns a process-wide singleton. Never construct
 `Config()` per request — the file is parsed once at startup. Derived paths are
-properties: `snapshot_dir`, `devices_dir`, `backup_log_dir`.
+properties: `snapshot_dir`, `devices_dir`, `backup_log_dir`, `scan_log_dir`.
 
 ## Snapshot format
 
@@ -144,6 +144,12 @@ Flask serves requests from multiple threads. Shared mutable state is guarded:
 Both scan and backup task registries prune finished entries so they cannot
 grow without bound. Worker threads catch exceptions and report them through
 the task's `status`/`error` fields — never leave a task stuck in `running`.
+
+Every scan also has an append-only `scan_logs/<scan_id>.jsonl` log. Lifecycle,
+throttled progress, and each access error are flushed to it. The scan status
+API reconstructs completed/failed tasks from these logs after process restart;
+a log without a terminal event is presented as `interrupted`. Keep scan IDs as
+server-generated canonical UUIDs because they are used as log filenames.
 
 A backup worker only moves `started` → `running` when the task is still
 `started` (compare-and-set), so a stop request that arrives before the thread

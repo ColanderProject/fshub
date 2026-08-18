@@ -123,6 +123,7 @@ def scan(path, use_index, skip_paths):
         reporter.finish(result['counters'] if 'result' in locals() else None)
 
     click.echo(f"Snapshot saved to {result['result_path']}")
+    click.echo(f"Scan log saved as {result['scan_log']}")
     click.echo(
         "Scanned "
         f"{result['counters'].get('scanned_count', 0)} files, "

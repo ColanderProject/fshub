@@ -221,6 +221,29 @@
                     <button class="btn btn-primary mt-2" id="start-scan">Start Scan</button>
                 </div>
                 
+                <div id="scan-tasks" class="mb-4">
+                    <div class="d-flex align-items-center justify-content-between">
+                        <h4>Scan Status</h4>
+                        <button class="btn btn-sm btn-outline-secondary" id="refresh-scan-tasks">Refresh</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Path</th>
+                                    <th>Status</th>
+                                    <th>Files / Size</th>
+                                    <th>Errors</th>
+                                    <th>Current path</th>
+                                    <th>Started</th>
+                                    <th>Log</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scan-tasks-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div id="scan-results">
                     <h4>Scan Results</h4>
                     <table class="table">
@@ -494,6 +517,27 @@
         </div>
     </div>
 
+    <!-- Scan Log Popup -->
+    <div id="scan-log-modal" class="modal fade" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Scan Log</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="scan-log-id" class="text-muted small mb-2"></div>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
+                            <tbody id="scan-log-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Filename Popup -->
     <div id="filename-popup" class="modal fade" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -530,6 +574,7 @@
         let backupInterval = null; // Interval for checking backup progress
         let backupType = null; // Current backup type (zip or folder)
         let onboardingShown = false; // Whether we already jumped to the devices tab
+        let scanPollInterval = null; // Poll while the Scanner tab is visible
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -541,6 +586,12 @@
             document.getElementById('toggle-dirs').addEventListener('click', toggleDirs);
             document.getElementById('toggle-files').addEventListener('click', toggleFiles);
             document.getElementById('start-scan').addEventListener('click', startScan);
+            document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
+                loadScanTasks();
+                loadScanResults();
+            });
+            document.getElementById('scanner-tab').addEventListener('shown.bs.tab', startScanPolling);
+            document.getElementById('scanner-tab').addEventListener('hidden.bs.tab', stopScanPolling);
             document.getElementById('search-btn').addEventListener('click', performSearch);
             // document.getElementById('create-zip-backup').addEventListener('click', createZipBackup);
             // document.getElementById('create-folder-backup').addEventListener('click', createFolderBackup);
@@ -1121,13 +1172,142 @@
             
             if (response.ok) {
                 alert(`Scan started with ID: ${data.scan_id}`);
-                // Refresh the scan results after a delay
-                setTimeout(loadScanResults, 2000);
+                loadScanTasks();
+                startScanPolling();
             } else {
                 alert('Scan failed: ' + data.error);
             }
         }
         
+        function startScanPolling() {
+            loadScanTasks();
+            loadScanResults();
+            if (!scanPollInterval) {
+                scanPollInterval = setInterval(() => {
+                    loadScanTasks();
+                    loadScanResults();
+                }, 3000);
+            }
+        }
+
+        function stopScanPolling() {
+            if (scanPollInterval) {
+                clearInterval(scanPollInterval);
+                scanPollInterval = null;
+            }
+        }
+
+        function scanStatusBadge(status) {
+            const classes = {
+                running: 'text-bg-primary',
+                completed: 'text-bg-success',
+                completed_with_errors: 'text-bg-warning',
+                error: 'text-bg-danger',
+                interrupted: 'text-bg-warning'
+            };
+            const badge = document.createElement('span');
+            badge.className = `badge ${classes[status] || 'text-bg-secondary'}`;
+            badge.textContent = status;
+            return badge;
+        }
+
+        // Load live and persisted scan tasks. Persisted entries remain visible
+        // after the web process is restarted.
+        async function loadScanTasks() {
+            const response = await fetch('/api/v1/scan-tasks', {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+            if (!response.ok) return;
+
+            const data = await response.json();
+            const tbody = document.getElementById('scan-tasks-tbody');
+            tbody.innerHTML = '';
+
+            data.scans.forEach(scan => {
+                const counters = scan.counters || {};
+                const row = document.createElement('tr');
+
+                const pathCell = document.createElement('td');
+                pathCell.className = 'filename-cell';
+                pathCell.textContent = scan.path || '';
+                pathCell.title = scan.path || '';
+                row.appendChild(pathCell);
+
+                const statusCell = document.createElement('td');
+                statusCell.appendChild(scanStatusBadge(scan.status));
+                if (scan.error) statusCell.title = scan.error;
+                row.appendChild(statusCell);
+
+                const progressCell = document.createElement('td');
+                progressCell.textContent = `${counters.scanned_count || 0} / ${formatBytes(counters.scanned_size || 0)}`;
+                row.appendChild(progressCell);
+
+                const errorsCell = document.createElement('td');
+                errorsCell.textContent = String(counters.error_count ?? (counters.errors || []).length);
+                row.appendChild(errorsCell);
+
+                const currentCell = document.createElement('td');
+                currentCell.className = 'filename-cell';
+                currentCell.textContent = counters.current_path || '';
+                currentCell.title = counters.current_path || '';
+                row.appendChild(currentCell);
+
+                const startedCell = document.createElement('td');
+                startedCell.textContent = scan.start_time ? formatTimestamp(scan.start_time) : '';
+                row.appendChild(startedCell);
+
+                const logCell = document.createElement('td');
+                const logButton = document.createElement('button');
+                logButton.className = 'btn btn-sm btn-outline-primary';
+                logButton.textContent = 'View';
+                logButton.addEventListener('click', () => showScanLog(scan.scan_id));
+                logCell.appendChild(logButton);
+                row.appendChild(logCell);
+
+                tbody.appendChild(row);
+            });
+        }
+
+        function scanLogDetails(record) {
+            const counters = record.counters || {};
+            if (record.event === 'started') {
+                return `Path: ${record.path}; skipped: ${(record.skip_paths || []).join(', ') || 'none'}`;
+            }
+            if (record.event === 'scan_error') return record.message || '';
+            if (record.event === 'failed') return record.error || '';
+            if (record.event === 'completed') {
+                return `Snapshot: ${record.result_file}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
+            }
+            return `Current: ${counters.current_path || ''}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
+        }
+
+        async function showScanLog(scanId) {
+            const response = await fetch(`/api/v1/scan/${encodeURIComponent(scanId)}/log`, {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
+                return;
+            }
+
+            document.getElementById('scan-log-id').textContent = scanId;
+            const tbody = document.getElementById('scan-log-tbody');
+            tbody.innerHTML = '';
+            data.records.forEach(record => {
+                const row = document.createElement('tr');
+                [formatTimestamp(record.timestamp), record.event, scanLogDetails(record)].forEach(value => {
+                    const cell = document.createElement('td');
+                    cell.textContent = value;
+                    row.appendChild(cell);
+                });
+                tbody.appendChild(row);
+            });
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('scan-log-modal')).show();
+        }
+
         // Load scan results
         async function loadScanResults() {
             const response = await fetch('/api/v1/scans', {

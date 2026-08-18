@@ -85,6 +85,7 @@ Everything lives under `data_path`:
 ~/.fshub/
 ├── snapshots/   # snapshot_<ts>_<count>_<uuid>.jsonl.gz and their *_groups.jl logs
 ├── devices/     # devices_<host>.jl, media_<host>.jl
+├── scan_logs/   # one append-only JSONL status/error log per scan run
 └── backups/     # one JSONL log per backup run
 ```
 
@@ -95,6 +96,15 @@ than overwriting the previous one — even for two runs started within the same
 second. A run that could not copy every selected file finishes as
 `completed_with_errors` and reports `failed_files`/`errors`; it never claims
 success.
+
+Web scans are asynchronous. The Scanner tab polls live progress and lists
+historical runs. `GET /api/v1/scan-tasks` lists them,
+`GET /api/v1/scan/<scan_id>` returns one status, and
+`GET /api/v1/scan/<scan_id>/log` returns its lifecycle/progress/error records.
+Scan logs are append-only files under `scan_logs/`; access errors are flushed
+as they occur, and status remains queryable after a restart. A partial scan
+finishes as `completed_with_errors`; a non-terminal log left by a killed
+process is reported as `interrupted`.
 
 Hashing is also asynchronous so a large snapshot does not occupy a web
 worker. `POST /api/v1/hash/calculate` and `POST /api/v1/hash/duplicates`

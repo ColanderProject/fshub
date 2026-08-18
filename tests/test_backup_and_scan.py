@@ -11,6 +11,8 @@ from conftest import select_all_files, wait_for_hash_task, wait_for_task
 from fshub import scanning
 from fshub.api import backup as backup_module
 from fshub.api import hashes as hashes_module
+from fshub.api import scans as scans_module
+from fshub.scan_logs import read_scan_log, summarize_scan_log
 from fshub.scanning import is_related_path, run_scan_to_snapshot
 
 
@@ -106,6 +108,57 @@ def test_scan_endpoint_reports_status(client, sample_tree):
 
 def test_unknown_scan_id_is_404(client):
     assert client.get('/api/v1/scan/nope').status_code == 404
+
+
+def test_scan_status_and_log_survive_registry_loss(client, sample_tree):
+    response = client.post('/api/v1/scan', json={'path': str(sample_tree)})
+    scan_id = response.get_json()['scan_id']
+
+    for _ in range(100):
+        status = client.get(f'/api/v1/scan/{scan_id}').get_json()
+        if status['status'] != 'running':
+            break
+        time.sleep(0.02)
+    assert status['status'] == 'completed'
+
+    listing = client.get('/api/v1/scan-tasks').get_json()['scans']
+    assert any(item['scan_id'] == scan_id for item in listing)
+    log = client.get(f'/api/v1/scan/{scan_id}/log').get_json()['records']
+    assert log[0]['event'] == 'started'
+    assert log[-1]['event'] == 'completed'
+
+    # Simulate a process restart: status is reconstructed from the durable log.
+    with scans_module.scan_lock:
+        scans_module.running_scans.pop(scan_id, None)
+    restored = client.get(f'/api/v1/scan/{scan_id}').get_json()
+    assert restored['status'] == 'completed'
+    assert restored['result_file'] == status['result_file']
+
+
+def test_scan_access_errors_are_written_immediately(config, sample_tree, monkeypatch):
+    inaccessible = str(sample_tree / 'a.txt')
+    real_stat = scanning.os.stat
+
+    def failing_stat(path, *args, **kwargs):
+        if str(path) == inaccessible:
+            raise PermissionError('test denied')
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanning.os, 'stat', failing_stat)
+    result = run_scan_to_snapshot(str(sample_tree))
+    records = read_scan_log(result['scan_id'])
+
+    errors = [record for record in records if record['event'] == 'scan_error']
+    assert len(errors) == 1
+    assert inaccessible in errors[0]['message']
+    assert 'test denied' in errors[0]['message']
+    assert records[-1]['event'] == 'completed'
+    assert records[-1]['counters']['error_count'] == 1
+    assert summarize_scan_log(records)['status'] == 'completed_with_errors'
+
+
+def test_scan_log_endpoint_rejects_invalid_id(client):
+    assert client.get('/api/v1/scan/not-a-uuid/log').status_code == 404
 
 
 def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_path):

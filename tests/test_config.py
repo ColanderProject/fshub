@@ -64,6 +64,7 @@ def test_derived_paths(tmp_path):
     assert config.snapshot_dir == os.path.join(str(tmp_path / 'd'), 'snapshots')
     assert os.path.isdir(config.devices_dir)
     assert os.path.isdir(config.backup_log_dir)
+    assert os.path.isdir(config.scan_log_dir)
 
 
 def test_out_of_range_port_falls_back_to_default(tmp_path, capsys):

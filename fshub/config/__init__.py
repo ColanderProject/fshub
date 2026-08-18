@@ -105,9 +105,14 @@ class Config:
     def backup_log_dir(self):
         return os.path.join(self.data_path, 'backups')
 
+    @property
+    def scan_log_dir(self):
+        return os.path.join(self.data_path, 'scan_logs')
+
     def ensure_dirs(self):
         """Create every data directory the application relies on."""
-        for path in (self.data_path, self.snapshot_dir, self.devices_dir, self.backup_log_dir):
+        for path in (self.data_path, self.snapshot_dir, self.devices_dir,
+                     self.backup_log_dir, self.scan_log_dir):
             os.makedirs(path, exist_ok=True)
 
     def to_dict(self):
