@@ -7,7 +7,8 @@ fshub is a Python package for managing files across multiple devices. It provide
 - Web-based file explorer with recursive directory size / file counts
 - Device management
 - File scanning and hashing (including duplicate detection)
-- Coarse Windows cloud-file state (`pinned`, `not_fully_local`, `evictable`)
+- Coarse Windows cloud-file state (`pinned`, `not_fully_local`, `evictable`),
+  with an Explorer toggle to count fully local files only
 - Group management (include/exclude filters)
 - Backup to a folder or to split zip archives
 - Cross-platform support (Windows and Linux)

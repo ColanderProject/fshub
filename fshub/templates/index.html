@@ -100,6 +100,11 @@
                             <input class="form-check-input" type="checkbox" id="recursive-calc-check" disabled>
                             <label class="form-check-label" for="recursive-calc-check">Recalculate sizes & counts based on filter</label>
                         </div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" id="local-only-stats-check">
+                            <label class="form-check-label" for="local-only-stats-check">Count fully local files only</label>
+                            <div class="form-text">Excludes files marked “Not fully local”; sizes remain logical file sizes.</div>
+                        </div>
                     </div>
 
                     <div>
@@ -110,6 +115,7 @@
                     <div class="path-breadcrumb">
                         <button class="btn btn-sm btn-outline-secondary me-2" id="back-btn" style="display:none;">Back</button>
                         <span id="current-path">/</span>
+                        <div id="path-stats" class="small text-muted mt-1"></div>
                     </div>
 
                     <div id="dirs-container">
@@ -142,8 +148,8 @@
                             <thead>
                                 <tr>
                                     <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
-                                    <th class="sortable-header" data-column="size">Total Size <span class="sort-indicator"></span></th>
-                                    <th class="sortable-header" data-column="files">Total Files <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="size"><span id="dirs-size-heading">Total Size</span> <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="files"><span id="dirs-files-heading">Total Files</span> <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
@@ -559,6 +565,7 @@
         // Global variables
         let currentSnapshot = null;
         let currentPath = '/';
+        let currentPathStats = null;
         let pathHistory = [];  // Stack for path navigation history
         let dirsVisible = true;
         let filesVisible = true;
@@ -587,6 +594,10 @@
             document.getElementById('toggle-dirs').addEventListener('click', toggleDirs);
             document.getElementById('toggle-files').addEventListener('click', toggleFiles);
             document.getElementById('start-scan').addEventListener('click', startScan);
+            document.getElementById('local-only-stats-check').addEventListener('change', () => {
+                updateLocalStatsDisplay();
+                sortDirectories(dirsSortColumn, true);
+            });
             document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
                 loadScanTasks();
                 loadScanResults();
@@ -877,6 +888,8 @@
                 // Store original data for sorting, filtering, and paging
                 originalDirs = [...data.dirs];
                 originalFiles = [...data.files];
+                currentPathStats = data;
+                updateLocalStatsDisplay();
 
                 // Reset pagination
                 currentDirsPage = 1;
@@ -2632,6 +2645,38 @@
             });
         }
 
+        function useLocalStats() {
+            return document.getElementById('local-only-stats-check').checked;
+        }
+
+        function displayedDirectorySize(directory) {
+            return useLocalStats() ? directory.local_size : directory.S;
+        }
+
+        function displayedDirectoryCount(directory) {
+            return useLocalStats() ? directory.local_file_count : directory.C;
+        }
+
+        function updateLocalStatsDisplay() {
+            const localOnly = useLocalStats();
+            document.getElementById('dirs-size-heading').textContent =
+                localOnly ? 'Fully Local Size' : 'Total Size';
+            document.getElementById('dirs-files-heading').textContent =
+                localOnly ? 'Fully Local Files' : 'Total Files';
+
+            const stats = document.getElementById('path-stats');
+            if (!currentPathStats) {
+                stats.textContent = '';
+                return;
+            }
+            const size = localOnly ? currentPathStats.local_size : currentPathStats.S;
+            const count = localOnly
+                ? currentPathStats.local_file_count
+                : currentPathStats.C;
+            const label = localOnly ? 'Fully local' : 'All files';
+            stats.textContent = `${label}: ${count || 0} files, ${formatBytes(size || 0)}`;
+        }
+
         // Sorting functions
         function sortDirectories(column, set=false) {
             if (!set) {
@@ -2662,16 +2707,16 @@
                             return valB.localeCompare(valA);
                         }
                     case 'size':
-                        valA = a.S || 0;
-                        valB = b.S || 0;
+                        valA = displayedDirectorySize(a) || 0;
+                        valB = displayedDirectorySize(b) || 0;
                         if (dirsSortDirection === 'asc') {
                             return valA - valB;
                         } else {
                             return valB - valA;
                         }
                     case 'files':
-                        valA = a.C || 0;
-                        valB = b.C || 0;
+                        valA = displayedDirectoryCount(a) || 0;
+                        valB = displayedDirectoryCount(b) || 0;
                         if (dirsSortDirection === 'asc') {
                             return valA - valB;
                         } else {
@@ -2861,8 +2906,9 @@
                     nameCell.appendChild(nameLink);
 
                     row.appendChild(nameCell);
-                    row.appendChild(createTextCell(formatBytes(dir.S) || '0 Bytes')); // Total Size
-                    row.appendChild(createTextCell(dir.C || 0)); // Total Files
+                    row.appendChild(createTextCell(
+                        formatBytes(displayedDirectorySize(dir) || 0)));
+                    row.appendChild(createTextCell(displayedDirectoryCount(dir) || 0));
                     row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));

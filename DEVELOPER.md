@@ -86,8 +86,11 @@ device info of the machine that produced it (`device_name`, `os_name`,
 
 ### Computed fields
 
-On load, `S` (total size) and `C` (total file count) are computed for every
-directory, *including subdirectories*. This is done iteratively in
+On load, `S` (total logical size) and `C` (total file count) are computed for
+every directory, *including subdirectories*. `LS` and `LC` contain the same
+totals after excluding files whose cloud state is `not_fully_local`; the UI's
+“Count fully local files only” checkbox switches to these values. `LS` remains
+a logical-size total, not NTFS allocated bytes. These totals are computed iteratively in
 `_compute_recursive_totals`: an explicit child→parent map plus a memoised
 depth sort. Do not turn this back into a recursive walk — real trees exceed
 Python's recursion limit, and the Windows "This PC" root (`/` → `C:\`) has no
