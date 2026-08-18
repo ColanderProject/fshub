@@ -212,6 +212,16 @@ class ScanRunLog:
                 self._log_file = None
 
 
+def _decode_log_record(line, scan_id):
+    try:
+        record = json.loads(line.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if isinstance(record, dict) and record.get('scan_id') == scan_id:
+        return record
+    return None
+
+
 def read_scan_log(scan_id):
     """Read valid records from one detailed log, ignoring a truncated line."""
     path, _status_path = _paths(scan_id)
@@ -219,15 +229,40 @@ def read_scan_log(scan_id):
     try:
         with open(path, 'rb') as log_file:
             for line in log_file:
-                try:
-                    record = json.loads(line.decode('utf-8'))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if isinstance(record, dict) and record.get('scan_id') == scan_id:
+                record = _decode_log_record(line, scan_id)
+                if record is not None:
                     records.append(record)
     except FileNotFoundError:
         return None
     return records or None
+
+
+def read_scan_log_page(scan_id, cursor=0, limit=200):
+    """Read a bounded page and return (records, next byte cursor, has_more)."""
+    path, _status_path = _paths(scan_id)
+    records = []
+    try:
+        with open(path, 'rb') as log_file:
+            log_file.seek(cursor)
+            while len(records) < limit:
+                line = log_file.readline()
+                if not line:
+                    break
+                record = _decode_log_record(line, scan_id)
+                if record is not None:
+                    records.append(record)
+            next_cursor = log_file.tell()
+
+            has_more = False
+            for line in log_file:
+                if _decode_log_record(line, scan_id) is not None:
+                    has_more = True
+                    break
+    except (FileNotFoundError, OSError):
+        return None
+    if not records and cursor == 0:
+        return None
+    return records, next_cursor, has_more
 
 
 def read_scan_status(scan_id):

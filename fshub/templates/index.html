@@ -540,6 +540,7 @@
                             <tbody id="scan-log-tbody"></tbody>
                         </table>
                     </div>
+                    <button class="btn btn-sm btn-outline-primary" id="scan-log-more" hidden>Load more</button>
                 </div>
             </div>
         </div>
@@ -583,6 +584,8 @@
         let backupType = null; // Current backup type (zip or folder)
         let onboardingShown = false; // Whether we already jumped to the devices tab
         let scanPollInterval = null; // Poll while the Scanner tab is visible
+        let currentScanLogId = null;
+        let scanLogCursor = 0;
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -598,6 +601,7 @@
                 updateLocalStatsDisplay();
                 sortDirectories(dirsSortColumn, true);
             });
+            document.getElementById('scan-log-more').addEventListener('click', loadScanLogPage);
             document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
                 loadScanTasks();
                 loadScanResults();
@@ -1301,20 +1305,22 @@
             return `Current: ${counters.current_path || ''}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
         }
 
-        async function showScanLog(scanId) {
-            const response = await fetch(`/api/v1/scan/${encodeURIComponent(scanId)}/log`, {
-                method: 'GET',
-                credentials: 'same-origin'
-            });
+        async function loadScanLogPage() {
+            const moreButton = document.getElementById('scan-log-more');
+            moreButton.disabled = true;
+            const params = new URLSearchParams({cursor: scanLogCursor, limit: 200});
+            const response = await fetch(
+                `/api/v1/scan/${encodeURIComponent(currentScanLogId)}/log?${params}`,
+                {method: 'GET', credentials: 'same-origin'}
+            );
             const data = await response.json();
+            moreButton.disabled = false;
             if (!response.ok) {
                 alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
-                return;
+                return false;
             }
 
-            document.getElementById('scan-log-id').textContent = scanId;
             const tbody = document.getElementById('scan-log-tbody');
-            tbody.innerHTML = '';
             data.records.forEach(record => {
                 const row = document.createElement('tr');
                 [formatTimestamp(record.timestamp), record.event, scanLogDetails(record)].forEach(value => {
@@ -1324,7 +1330,20 @@
                 });
                 tbody.appendChild(row);
             });
-            bootstrap.Modal.getOrCreateInstance(document.getElementById('scan-log-modal')).show();
+            scanLogCursor = data.next_cursor;
+            moreButton.hidden = !data.has_more;
+            return true;
+        }
+
+        async function showScanLog(scanId) {
+            currentScanLogId = scanId;
+            scanLogCursor = 0;
+            document.getElementById('scan-log-id').textContent = scanId;
+            document.getElementById('scan-log-tbody').innerHTML = '';
+            if (await loadScanLogPage()) {
+                bootstrap.Modal.getOrCreateInstance(
+                    document.getElementById('scan-log-modal')).show();
+            }
         }
 
         // Load scan results

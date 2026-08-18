@@ -102,7 +102,8 @@ success.
 Web scans are asynchronous. The Scanner tab polls while a scan is running and
 lists the 50 newest runs. `GET /api/v1/scan-tasks` lists them,
 `GET /api/v1/scan/<scan_id>` returns one status, and
-`GET /api/v1/scan/<scan_id>/log` returns its lifecycle/progress/error records.
+`GET /api/v1/scan/<scan_id>/log` returns its lifecycle/progress/error records
+in bounded cursor pages (`cursor`, `limit`; maximum 500 records).
 Web and CLI scans both write append-only detailed logs and small status
 sidecars under `scan_logs/`. Access errors are written through one open handle
 and flushed without `fsync`; the status API returns their total count and at most

@@ -304,6 +304,50 @@ def test_scan_errors_are_bounded_in_status_but_complete_in_log(config, client):
     assert listed['counters'] == status['counters']
 
 
+def test_scan_log_endpoint_is_cursor_paginated(config, client):
+    run_log = ScanRunLog()
+    run_log.started('/paged-log')
+    counters = {
+        'current_path': '/paged-log',
+        'scanned_count': 0,
+        'scanned_size': 0,
+        'error_count': 45,
+        'errors': [],
+    }
+    for index in range(45):
+        run_log.scan_error(f'error {index}', counters)
+    run_log.completed(counters, 'snapshot.jsonl.gz')
+
+    records = []
+    cursor = 0
+    while True:
+        response = client.get(
+            f'/api/v1/scan/{run_log.scan_id}/log',
+            query_string={'cursor': cursor, 'limit': 20},
+        )
+        assert response.status_code == 200
+        page = response.get_json()
+        assert len(page['records']) <= 20
+        records.extend(page['records'])
+        assert page['next_cursor'] >= cursor
+        cursor = page['next_cursor']
+        if not page['has_more']:
+            break
+
+    assert records == read_scan_log(run_log.scan_id)
+
+
+@pytest.mark.parametrize('query', [
+    {'cursor': -1},
+    {'cursor': 'nope'},
+    {'limit': 0},
+    {'limit': 501},
+])
+def test_scan_log_endpoint_validates_pagination(client, query):
+    assert client.get(
+        f'/api/v1/scan/{uuid.uuid4()}/log', query_string=query).status_code == 400
+
+
 def test_scan_status_listing_is_limited(config):
     for index in range(51):
         run_log = ScanRunLog()

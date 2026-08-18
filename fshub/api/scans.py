@@ -7,14 +7,14 @@ import traceback
 import uuid
 from datetime import datetime
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from ..config import get_config
 from ..scan_logs import (
     MAX_REPORTED_ERRORS,
     ScanRunLog,
     list_scan_statuses,
-    read_scan_log,
+    read_scan_log_page,
     read_scan_status,
 )
 from ..scanning import is_related_path, run_scan_to_snapshot
@@ -186,14 +186,28 @@ def get_scan_tasks():
 
 @scan_bp.route('/api/v1/scan/<scan_id>/log', methods=['GET'])
 def get_scan_log(scan_id):
-    """Return the durable lifecycle/progress/error records for a scan."""
+    """Return one bounded page of durable scan-log records."""
     try:
-        records = read_scan_log(scan_id)
+        cursor = int(request.args.get('cursor', 0))
+        limit = int(request.args.get('limit', 200))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'cursor and limit must be integers'}), 400
+    if cursor < 0 or not 1 <= limit <= 500:
+        return jsonify({'error': 'cursor must be non-negative and limit must be 1-500'}), 400
+
+    try:
+        page = read_scan_log_page(scan_id, cursor=cursor, limit=limit)
     except ValueError:
-        records = None
-    if records is None:
+        page = None
+    if page is None:
         return jsonify({'error': 'Scan ID not found'}), 404
-    return jsonify({'scan_id': scan_id, 'records': records})
+    records, next_cursor, has_more = page
+    return jsonify({
+        'scan_id': scan_id,
+        'records': records,
+        'next_cursor': next_cursor,
+        'has_more': has_more,
+    })
 
 
 @scan_bp.route('/api/v1/scans', methods=['GET'])

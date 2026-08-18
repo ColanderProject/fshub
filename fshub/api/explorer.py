@@ -589,14 +589,11 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
         if subdir_idx is not None:
             subdir_obj = data[subdir_idx]
             if recursive_calc:
-                size, count = calculate_filtered_recursive_totals(
-                    subdir_obj, snapshot_filename, filter_in, filter_out, entry=entry,
-                )
-                local_size, local_count = calculate_filtered_recursive_totals(
+                totals = calculate_filtered_recursive_totals(
                     subdir_obj, snapshot_filename, filter_in, filter_out,
-                    entry=entry, local_only=True,
+                    entry=entry,
                 )
-                _apply_totals(dir_info, size, count, local_size, local_count)
+                _apply_totals(dir_info, *totals)
             else:
                 _apply_totals(
                     dir_info,
@@ -628,18 +625,19 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
 
 
 def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups_dict,
-                       files=None, dirinFilterSet=None, allIncluded=False,
-                       local_only=False):
+                       files=None, dirinFilterSet=None, allIncluded=False):
     """Total a directory tree, honouring the group filters.
 
-    Returns (total_size, total_count) and, when ``files`` is provided,
-    appends every matching file to it.
+    Returns total and fully-local size/count values and, when ``files`` is
+    provided, appends every matching file to it.
 
     Uses an explicit stack rather than recursion: snapshots routinely nest
     deeper than Python's recursion limit.
     """
     total_size = 0
     total_count = 0
+    local_size = 0
+    local_count = 0
 
     snapshot_os = data[0].get('os_name') if data else None
 
@@ -667,12 +665,13 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
             if not should_include:
                 continue
-            if local_only and not _is_fully_local(current, i):
-                continue
 
             size = current['s'][i] if i < len(current.get('s', [])) else 0
             total_size += size
             total_count += 1
+            if _is_fully_local(current, i):
+                local_size += size
+                local_count += 1
             if files is not None:
                 files.append({
                     'name': filename,
@@ -707,16 +706,15 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
             stack.append((data[subdir_idx], subdir_include))
 
-    return total_size, total_count
+    return total_size, total_count, local_size, local_count
 
 
 def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out,
-                                        entry=None, local_only=False):
+                                        entry=None):
     entry = entry or _snapshot_view(snapshot_filename, copy_groups=True) or EMPTY_SNAPSHOT
     return filter_on_snapshot(
         path_obj, entry['data'], entry['index'],
         filter_in, filter_out, entry['groups'], None,
-        local_only=local_only,
     )
 
 

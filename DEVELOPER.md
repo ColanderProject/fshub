@@ -156,7 +156,8 @@ the task's `status`/`error` fields — never leave a task stuck in `running`.
 
 Every scan has an append-only `scan_logs/<scan_id>.jsonl` detail log and a
 small `<scan_id>.status.json` sidecar. The list API reads at most the 50 newest
-sidecars instead of parsing historical logs. Access errors are counted without
+sidecars instead of parsing historical logs, and the detail API uses bounded
+byte-cursor pages rather than materializing an entire JSONL file. Access errors are counted without
 limit but only 20 messages are kept in task status; all messages go to the log,
 whose open handle is flushed without `fsync`. Logging failures never fail a scan.
 A non-terminal sidecar is presented as `interrupted` after restart. Keep scan
