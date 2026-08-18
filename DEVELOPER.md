@@ -145,11 +145,13 @@ Both scan and backup task registries prune finished entries so they cannot
 grow without bound. Worker threads catch exceptions and report them through
 the task's `status`/`error` fields — never leave a task stuck in `running`.
 
-Every scan also has an append-only `scan_logs/<scan_id>.jsonl` log. Lifecycle,
-throttled progress, and each access error are flushed to it. The scan status
-API reconstructs completed/failed tasks from these logs after process restart;
-a log without a terminal event is presented as `interrupted`. Keep scan IDs as
-server-generated canonical UUIDs because they are used as log filenames.
+Every scan has an append-only `scan_logs/<scan_id>.jsonl` detail log and a
+small `<scan_id>.status.json` sidecar. The list API reads at most the 50 newest
+sidecars instead of parsing historical logs. Access errors are counted without
+limit but only 20 messages are kept in task status; all messages go to the log,
+whose open handle is flushed without `fsync`. Logging failures never fail a scan.
+A non-terminal sidecar is presented as `interrupted` after restart. Keep scan
+IDs as server-generated canonical UUIDs because they are used as filenames.
 
 A backup worker only moves `started` → `running` when the task is still
 `started` (compare-and-set), so a stop request that arrives before the thread

@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fshub import config as config_module  # noqa: E402
 from fshub.api import backup as backup_module  # noqa: E402
 from fshub.api import hashes as hashes_module  # noqa: E402
+from fshub.api import scans as scans_module  # noqa: E402
 from fshub.api.explorer import loaded_snapshots  # noqa: E402
 from fshub.web import create_app  # noqa: E402
 
@@ -38,6 +39,8 @@ def app(config):
     loaded_snapshots.clear()
     backup_module.backup_tasks.clear()
     hashes_module.hash_tasks.clear()
+    with scans_module.scan_lock:
+        scans_module.running_scans.clear()
 
 
 @pytest.fixture

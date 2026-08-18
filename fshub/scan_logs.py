@@ -1,15 +1,18 @@
-"""Durable, append-only logs for filesystem scan runs."""
+"""Durable logs and small status files for filesystem scan runs."""
 
 from datetime import datetime
 import json
 import os
-import threading
+import sys
 import time
 import uuid
 
 from .config import get_config
 
-_LOG_SUFFIX = '.jsonl'
+LOG_SUFFIX = '.jsonl'
+STATUS_SUFFIX = '.status.json'
+MAX_LISTED_SCANS = 50
+MAX_REPORTED_ERRORS = 20
 _PROGRESS_INTERVAL = 5.0
 
 
@@ -18,12 +21,13 @@ def _timestamp():
 
 
 def _counter_snapshot(counters):
-    """Return the bounded part of counters suitable for repeated log entries."""
+    errors = list(counters.get('errors', []))[:MAX_REPORTED_ERRORS]
     return {
         'current_path': counters.get('current_path', ''),
         'scanned_count': counters.get('scanned_count', 0),
         'scanned_size': counters.get('scanned_size', 0),
-        'error_count': len(counters.get('errors', [])),
+        'error_count': counters.get('error_count', len(errors)),
+        'errors': errors,
     }
 
 
@@ -36,91 +40,181 @@ def _valid_scan_id(scan_id):
         return False
 
 
-def _log_path(scan_id):
+def _log_available(path):
+    try:
+        return os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def _paths(scan_id):
     if not _valid_scan_id(scan_id):
         raise ValueError('Invalid scan ID')
-    return os.path.join(get_config().scan_log_dir, scan_id + _LOG_SUFFIX)
+    base = os.path.join(get_config().scan_log_dir, scan_id)
+    return base + LOG_SUFFIX, base + STATUS_SUFFIX
 
 
 class ScanRunLog:
-    """Append lifecycle, progress and errors for one scan to disk.
+    """Write one scan's detailed log and compact latest-status sidecar.
 
-    A new file handle is opened for every event. Scan events are infrequent
-    (progress is throttled), and closing each append makes records available
-    after a process crash without relying on a long-lived buffered handle.
+    The JSONL handle stays open for the run and is flushed without fsync.
+    Logging failures are reported once to stderr and never fail the scan.
     """
 
     def __init__(self, scan_id=None):
         self.scan_id = scan_id or str(uuid.uuid4())
-        self.path = _log_path(self.scan_id)
-        self._lock = threading.Lock()
-        self._last_progress = time.monotonic()
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.path, self.status_path = _paths(self.scan_id)
+        self._log_file = None
+        self._reported_failure = False
+        self._last_progress = 0.0
+        self.start_time = None
+        self.scan_path = ''
+
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            self._log_file = open(self.path, 'a', encoding='utf-8')
+        except OSError as error:
+            self._report_failure(error)
 
     @property
-    def filename(self):
-        return os.path.basename(self.path)
+    def available(self):
+        return _log_available(self.path)
 
-    def _append(self, event, **fields):
+    def _report_failure(self, error):
+        if not self._reported_failure:
+            print(f'Could not persist scan log {self.path}: {error}', file=sys.stderr)
+            self._reported_failure = True
+
+    def _disable_log(self, error):
+        self._report_failure(error)
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except OSError:
+                pass
+        self._log_file = None
+
+    def _append(self, event, flush=False, **fields):
+        if self._log_file is None:
+            return
         record = {
             'timestamp': _timestamp(),
             'event': event,
             'scan_id': self.scan_id,
             **fields,
         }
-        encoded = json.dumps(record, ensure_ascii=False)
-        with self._lock:
-            with open(self.path, 'a', encoding='utf-8') as log_file:
-                log_file.write(encoded + '\n')
-                log_file.flush()
-                os.fsync(log_file.fileno())
+        try:
+            # ASCII escaping also makes unusual filesystem names safe to write.
+            self._log_file.write(json.dumps(record) + '\n')
+            if flush:
+                self._log_file.flush()
+        except (OSError, TypeError, ValueError, UnicodeError) as error:
+            self._disable_log(error)
+
+    def _write_status(self, status, counters, *, finish_time=None,
+                      error=None, result_file=None):
+        payload = {
+            'scan_id': self.scan_id,
+            'path': self.scan_path,
+            'status': status,
+            'start_time': self.start_time,
+            'finish_time': finish_time,
+            'counters': _counter_snapshot(counters),
+            'error': error,
+            'result_file': result_file,
+            'log_available': self.available,
+        }
+        temp_path = self.status_path + '.tmp'
+        try:
+            with open(temp_path, 'w', encoding='utf-8') as status_file:
+                json.dump(payload, status_file)
+            os.replace(temp_path, self.status_path)
+        except (OSError, TypeError, ValueError, UnicodeError) as write_error:
+            self._report_failure(write_error)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     def started(self, path, use_index=False, skip_paths=None):
+        self.start_time = _timestamp()
+        self.scan_path = path
+        counters = {
+            'current_path': path,
+            'scanned_count': 0,
+            'scanned_size': 0,
+            'error_count': 0,
+            'errors': [],
+        }
         self._append(
             'started',
+            flush=True,
             path=path,
             use_index=use_index,
             skip_paths=list(skip_paths or []),
         )
+        self._write_status('running', counters)
 
     def progress(self, counters, force=False):
         now = time.monotonic()
         if not force and now - self._last_progress < _PROGRESS_INTERVAL:
             return
         self._last_progress = now
-        self._append('progress', counters=_counter_snapshot(counters))
+        self._append('progress', flush=True, counters=_counter_snapshot(counters))
+        self._write_status('running', counters)
 
-    def scan_error(self, message, counters):
-        # Errors are never throttled: an interrupted scan must retain every
-        # access failure that had already been observed.
-        self._append(
-            'scan_error',
-            message=str(message),
-            counters=_counter_snapshot(counters),
-        )
+    def scan_error(self, message, _counters):
+        self._append('scan_error', flush=True, message=str(message))
 
     def completed(self, counters, result_file):
+        finish_time = _timestamp()
+        status = ('completed_with_errors'
+                  if counters.get('error_count', len(counters.get('errors', [])))
+                  else 'completed')
         self._append(
             'completed',
+            flush=True,
             counters=_counter_snapshot(counters),
             result_file=result_file,
         )
+        self._write_status(
+            status,
+            counters,
+            finish_time=finish_time,
+            result_file=result_file,
+        )
+        self.close()
 
     def failed(self, error, counters):
+        finish_time = _timestamp()
         self._append(
             'failed',
+            flush=True,
             error=str(error),
             counters=_counter_snapshot(counters),
         )
+        self._write_status(
+            'error',
+            counters,
+            finish_time=finish_time,
+            error=str(error),
+        )
+        self.close()
+
+    def close(self):
+        if self._log_file is not None:
+            try:
+                self._log_file.flush()
+                self._log_file.close()
+            except OSError as error:
+                self._report_failure(error)
+            finally:
+                self._log_file = None
 
 
 def read_scan_log(scan_id):
-    """Read valid records from one scan log.
-
-    A truncated final line can be left by an abrupt process termination. It is
-    ignored while all complete records remain available.
-    """
-    path = _log_path(scan_id)
+    """Read valid records from one detailed log, ignoring a truncated line."""
+    path, _status_path = _paths(scan_id)
     records = []
     try:
         with open(path, 'rb') as log_file:
@@ -133,77 +227,47 @@ def read_scan_log(scan_id):
                     records.append(record)
     except FileNotFoundError:
         return None
-    return records
+    return records or None
 
 
-def summarize_scan_log(records):
-    """Build a status response from records belonging to one scan."""
-    if not records:
+def read_scan_status(scan_id):
+    """Read one compact status sidecar; a stale running task is interrupted."""
+    _log_path, status_path = _paths(scan_id)
+    try:
+        with open(status_path, encoding='utf-8') as status_file:
+            status = json.load(status_file)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
-
-    first = next((record for record in records
-                  if record.get('event') == 'started'), records[0])
-    last = records[-1]
-    terminal = next(
-        (record for record in reversed(records)
-         if record.get('event') in ('completed', 'failed')),
-        None,
-    )
-    latest_counters = next(
-        (record.get('counters') for record in reversed(records)
-         if isinstance(record.get('counters'), dict)),
-        {},
-    )
-    errors = [record.get('message', '') for record in records
-              if record.get('event') == 'scan_error']
-
-    if terminal and terminal.get('event') == 'completed':
-        error_count = terminal.get('counters', {}).get('error_count', 0)
-        status = 'completed_with_errors' if error_count else 'completed'
-    elif terminal and terminal.get('event') == 'failed':
-        status = 'error'
-    else:
-        # A disk-only non-terminal run belonged to a previous process. It
-        # cannot still be running after that process has restarted.
-        status = 'interrupted'
-
-    counters = {
-        'current_path': latest_counters.get('current_path', first.get('path', '')),
-        'scanned_count': latest_counters.get('scanned_count', 0),
-        'scanned_size': latest_counters.get('scanned_size', 0),
-        'errors': errors,
-    }
-    return {
-        'scan_id': first.get('scan_id', last.get('scan_id')),
-        'path': first.get('path', ''),
-        'status': status,
-        'start_time': first.get('timestamp'),
-        'finish_time': terminal.get('timestamp') if terminal else None,
-        'counters': counters,
-        'error': terminal.get('error') if terminal else None,
-        'result_file': terminal.get('result_file') if terminal else None,
-        'log_available': True,
-    }
+    if not isinstance(status, dict) or status.get('scan_id') != scan_id:
+        return None
+    if status.get('status') == 'running':
+        status['status'] = 'interrupted'
+    status['log_available'] = _log_available(_log_path)
+    return status
 
 
-def list_scan_logs():
-    """Return durable scan summaries, newest first."""
+def list_scan_statuses(limit=MAX_LISTED_SCANS):
+    """Read at most ``limit`` small sidecars, newest first."""
     log_dir = get_config().scan_log_dir
     try:
-        names = os.listdir(log_dir)
+        names = [name for name in os.listdir(log_dir)
+                 if name.endswith(STATUS_SUFFIX)]
     except FileNotFoundError:
         return []
 
-    summaries = []
-    for name in names:
-        if not name.endswith(_LOG_SUFFIX):
-            continue
-        scan_id = name[:-len(_LOG_SUFFIX)]
+    def modified(name):
+        try:
+            return os.path.getmtime(os.path.join(log_dir, name))
+        except OSError:
+            return 0
+
+    names.sort(key=modified, reverse=True)
+    statuses = []
+    for name in names[:limit]:
+        scan_id = name[:-len(STATUS_SUFFIX)]
         if not _valid_scan_id(scan_id):
             continue
-        records = read_scan_log(scan_id)
-        summary = summarize_scan_log(records or [])
-        if summary:
-            summaries.append(summary)
-    summaries.sort(key=lambda item: item.get('start_time') or 0, reverse=True)
-    return summaries
+        status = read_scan_status(scan_id)
+        if status:
+            statuses.append(status)
+    return statuses

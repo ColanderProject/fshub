@@ -10,7 +10,7 @@ import time
 import uuid
 
 from .config import get_config
-from .scan_logs import ScanRunLog
+from .scan_logs import MAX_REPORTED_ERRORS, ScanRunLog
 from .utils import get_system_info
 
 
@@ -47,6 +47,7 @@ def _init_counters(counters, current_path):
     counters.setdefault('scanned_count', 0)
     counters.setdefault('scanned_size', 0)
     counters.setdefault('errors', [])
+    counters.setdefault('error_count', len(counters['errors']))
     counters['current_path'] = current_path
 
 
@@ -131,8 +132,10 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None,
 
 
 def _record_error(counters, message, error_callback=None):
-    """Update in-memory counters and immediately notify a durable logger."""
-    counters['errors'].append(message)
+    """Count every error but keep only a bounded sample in task status."""
+    counters['error_count'] += 1
+    if len(counters['errors']) < MAX_REPORTED_ERRORS:
+        counters['errors'].append(message)
     if error_callback:
         error_callback(message, counters)
 
@@ -290,15 +293,17 @@ def save_scan_result(scan_result, use_index=False):
 
 
 def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
-                         result_callback=None, skip_prefixes=None, scan_id=None):
+                         result_callback=None, skip_prefixes=None, scan_id=None,
+                         run_log=None):
     """Run a scan, save its snapshot, and durably log its status/errors."""
     counters = counters if counters is not None else {}
     start_time = datetime.now()
     counters['skip_prefixes'] = list(skip_prefixes or [])
     _init_counters(counters, scan_path)
 
-    run_log = ScanRunLog(scan_id)
-    run_log.started(scan_path, use_index=use_index, skip_paths=skip_prefixes)
+    if run_log is None:
+        run_log = ScanRunLog(scan_id)
+        run_log.started(scan_path, use_index=use_index, skip_paths=skip_prefixes)
 
     def report_progress(current_counters):
         run_log.progress(current_counters)
@@ -342,17 +347,12 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
         counters['current_path'] = scan_path
         run_log.completed(counters, saved_result['result_file'])
     except Exception as error:
-        # Do not replace the original scan exception if the final log write is
-        # itself the operation that failed.
-        try:
-            run_log.failed(error, counters)
-        except OSError:
-            pass
+        run_log.failed(error, counters)
         raise
 
     return {
         'scan_id': run_log.scan_id,
-        'scan_log': run_log.filename,
+        'scan_log': run_log.path,
         'result_file': saved_result['result_file'],
         'result_path': saved_result['result_path'],
         'entry_count': len(scan_result),

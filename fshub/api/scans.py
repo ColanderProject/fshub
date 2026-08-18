@@ -10,7 +10,13 @@ from datetime import datetime
 from flask import Blueprint, jsonify
 
 from ..config import get_config
-from ..scan_logs import list_scan_logs, read_scan_log, summarize_scan_log
+from ..scan_logs import (
+    MAX_REPORTED_ERRORS,
+    ScanRunLog,
+    list_scan_statuses,
+    read_scan_log,
+    read_scan_status,
+)
 from ..scanning import is_related_path, run_scan_to_snapshot
 from . import json_body
 from .explorer import list_snapshot_files
@@ -76,6 +82,8 @@ def start_scan():
 
         scan_id = str(uuid.uuid4())
         counters = {}
+        run_log = ScanRunLog(scan_id)
+        run_log.started(scan_path, use_index=use_index, skip_paths=skip_paths)
 
         def run_scan():
             try:
@@ -84,7 +92,7 @@ def start_scan():
                     use_index=use_index,
                     counters=counters,
                     skip_prefixes=skip_paths,
-                    scan_id=scan_id,
+                    run_log=run_log,
                 )
             except Exception as e:  # noqa: BLE001 - surfaced to the caller below
                 traceback.print_exc()
@@ -99,7 +107,7 @@ def start_scan():
             with scan_lock:
                 if scan_id in running_scans:
                     running_scans[scan_id]['status'] = (
-                        'completed_with_errors' if counters.get('errors')
+                        'completed_with_errors' if counters.get('error_count', 0)
                         else 'completed')
                     running_scans[scan_id]['result_file'] = result['result_file']
                     running_scans[scan_id]['counters'] = counters
@@ -110,21 +118,27 @@ def start_scan():
         running_scans[scan_id] = {
             'path': scan_path,
             'status': 'running',
-            'start_time': int(datetime.now().timestamp()),
+            'start_time': run_log.start_time,
             'counters': counters,
             'error': None,
             'finish_time': None,
+            'run_log': run_log,
         }
         thread.start()
 
     return jsonify({'scan_id': scan_id, 'status': 'started'})
 
 
-def _task_payload(scan_id, scan_info, include_errors=True):
-    counters = dict(scan_info['counters'])
-    errors = list(counters.get('errors', []))
-    counters['error_count'] = len(errors)
-    counters['errors'] = errors if include_errors else []
+def _task_payload(scan_id, scan_info):
+    source = scan_info['counters']
+    errors = list(source.get('errors', []))[:MAX_REPORTED_ERRORS]
+    counters = {
+        'current_path': source.get('current_path', scan_info['path']),
+        'scanned_count': source.get('scanned_count', 0),
+        'scanned_size': source.get('scanned_size', 0),
+        'error_count': source.get('error_count', len(errors)),
+        'errors': errors,
+    }
     return {
         'scan_id': scan_id,
         'path': scan_info['path'],
@@ -134,7 +148,7 @@ def _task_payload(scan_id, scan_info, include_errors=True):
         'counters': counters,
         'error': scan_info.get('error'),
         'result_file': scan_info.get('result_file'),
-        'log_available': True,
+        'log_available': scan_info['run_log'].available,
     }
 
 
@@ -147,27 +161,21 @@ def get_scan_status(scan_id):
             return jsonify(_task_payload(scan_id, scan_info))
 
     try:
-        records = read_scan_log(scan_id)
+        status = read_scan_status(scan_id)
     except ValueError:
-        records = None
-    summary = summarize_scan_log(records or [])
-    if summary is None:
+        status = None
+    if status is None:
         return jsonify({'error': 'Scan ID not found'}), 404
-    return jsonify(summary)
+    return jsonify(status)
 
 
 @scan_bp.route('/api/v1/scan-tasks', methods=['GET'])
 def get_scan_tasks():
-    """List running and historical scans, including logs from prior runs."""
-    durable = {item['scan_id']: item for item in list_scan_logs()}
-    for item in durable.values():
-        errors = item['counters'].get('errors', [])
-        item['counters']['error_count'] = len(errors)
-        item['counters']['errors'] = []
+    """List live tasks plus the 50 newest compact status sidecars."""
+    durable = {item['scan_id']: item for item in list_scan_statuses()}
     with scan_lock:
         for scan_id, scan_info in running_scans.items():
-            durable[scan_id] = _task_payload(
-                scan_id, scan_info, include_errors=False)
+            durable[scan_id] = _task_payload(scan_id, scan_info)
     scans = sorted(
         durable.values(),
         key=lambda item: item.get('start_time') or 0,

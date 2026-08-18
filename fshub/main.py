@@ -40,7 +40,8 @@ class ScanProgressReporter:
             f"Scanning {current_path} | "
             f"files={counters.get('scanned_count', 0)} | "
             f"size={format_bytes(counters.get('scanned_size', 0))} | "
-            f"errors={len(counters.get('errors', []))}"
+            "errors="
+            f"{counters.get('error_count', len(counters.get('errors', [])))}"
         )
         padded = line.ljust(self.last_width)
         sys.stdout.write('\r' + padded)
@@ -128,7 +129,8 @@ def scan(path, use_index, skip_paths):
         "Scanned "
         f"{result['counters'].get('scanned_count', 0)} files, "
         f"{format_bytes(result['counters'].get('scanned_size', 0))}, "
-        f"errors={len(result['counters'].get('errors', []))}"
+        "errors="
+        f"{result['counters'].get('error_count', len(result['counters'].get('errors', [])))}"
     )
     if skip_paths:
         click.echo(f"Skipped prefixes: {', '.join(skip_paths)}")

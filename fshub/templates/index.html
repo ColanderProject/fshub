@@ -1172,20 +1172,23 @@
             
             if (response.ok) {
                 alert(`Scan started with ID: ${data.scan_id}`);
-                loadScanTasks();
                 startScanPolling();
             } else {
                 alert('Scan failed: ' + data.error);
             }
         }
         
-        function startScanPolling() {
-            loadScanTasks();
+        async function startScanPolling() {
+            stopScanPolling();
+            const hasRunningScan = await loadScanTasks();
             loadScanResults();
-            if (!scanPollInterval) {
-                scanPollInterval = setInterval(() => {
-                    loadScanTasks();
-                    loadScanResults();
+            if (hasRunningScan) {
+                scanPollInterval = setInterval(async () => {
+                    const stillRunning = await loadScanTasks();
+                    if (!stillRunning) {
+                        loadScanResults();
+                        stopScanPolling();
+                    }
                 }, 3000);
             }
         }
@@ -1218,7 +1221,7 @@
                 method: 'GET',
                 credentials: 'same-origin'
             });
-            if (!response.ok) return;
+            if (!response.ok) return false;
 
             const data = await response.json();
             const tbody = document.getElementById('scan-tasks-tbody');
@@ -1261,12 +1264,14 @@
                 const logButton = document.createElement('button');
                 logButton.className = 'btn btn-sm btn-outline-primary';
                 logButton.textContent = 'View';
+                logButton.disabled = !scan.log_available;
                 logButton.addEventListener('click', () => showScanLog(scan.scan_id));
                 logCell.appendChild(logButton);
                 row.appendChild(logCell);
 
                 tbody.appendChild(row);
             });
+            return data.scans.some(scan => scan.status === 'running');
         }
 
         function scanLogDetails(record) {
