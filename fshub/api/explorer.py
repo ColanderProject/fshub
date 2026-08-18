@@ -355,7 +355,7 @@ def _validate_snapshot_record(record):
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ValueError(f'snapshot field {field!r} must be a list of strings')
 
-    for field in ('s', 't', 'T'):
+    for field in ('s', 't', 'T', 'c'):
         if not isinstance(record.get(field, []), list):
             raise ValueError(f'snapshot field {field!r} must be a list')
 
@@ -463,10 +463,12 @@ def get_snapshot_info(snapshot_filename):
 def _file_entry(path_obj, i):
     size = path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0
     timestamps = path_obj['t'][i] if i < len(path_obj.get('t', [])) else [None, None, None]
+    cloud_state = path_obj['c'][i] if i < len(path_obj.get('c', [])) else None
     return {
         'name': path_obj['f'][i],
         'size': size,
         'size_formatted': format_bytes(size),
+        'cloud_state': cloud_state,
         'created': timestamps[0],
         'modified': timestamps[1],
         'accessed': timestamps[2],

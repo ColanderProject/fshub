@@ -45,11 +45,24 @@ def test_windows_paths_are_web_normalized(client, config):
         'snapshot': 'snapshot_1_3.jsonl.gz', 'path': '/C:'}).get_json()
     assert listing['current_path'] == '/C:'
     assert [f['name'] for f in listing['files']] == ['boot.ini']
+    # Snapshots created before cloud-state support remain loadable.
+    assert listing['files'][0]['cloud_state'] is None
 
     # The filtered response uses the same path format as the plain one.
     filtered = client.get('/api/v1/getPath', query_string={
         'snapshot': 'snapshot_1_3.jsonl.gz', 'path': '/C:', 'use_filter': 'true'}).get_json()
     assert filtered['current_path'] == listing['current_path']
+
+
+def test_cloud_state_is_returned_with_file_entries(client, config):
+    records = _windows_snapshot()
+    records[1]['c'] = ['not_fully_local']
+    write_snapshot(config, 'snapshot_cloud.jsonl.gz', records)
+    client.post('/api/v1/load_snapshot', json={'filename': 'snapshot_cloud.jsonl.gz'})
+
+    listing = client.get('/api/v1/getPath', query_string={
+        'snapshot': 'snapshot_cloud.jsonl.gz', 'path': '/C:'}).get_json()
+    assert listing['files'][0]['cloud_state'] == 'not_fully_local'
 
 
 def test_to_web_path_is_noop_for_posix():

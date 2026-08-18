@@ -67,10 +67,16 @@ A snapshot is a gzipped JSONL file, one record per directory:
 | `f` | file names                                 |
 | `s` | file sizes, parallel to `f`                |
 | `t` | file `[ctime, mtime, atime]`, parallel to `f` |
+| `c` | coarse cloud state, parallel to `f` (`null` for normal/unknown files) |
 | `d` | subdirectory names                         |
 | `T` | subdirectory `[ctime, mtime, atime]`, parallel to `d` |
 
-All timestamps are Unix integers. The first record additionally carries the
+All timestamps are Unix integers. On Windows, `c` is derived from the
+`st_file_attributes` already returned by `os.stat`; it does not add another
+per-file system call. Values are `pinned`, `not_fully_local`, `evictable`, or
+`null`. This is intentionally coarse: `UNPINNED` means Windows may evict a file,
+not that it currently occupies no local space. Older snapshots without `c`
+load with a `null` cloud state. The first record additionally carries the
 device info of the machine that produced it (`device_name`, `os_name`,
 `thumbprint`, `start_scan_time`, ...).
 

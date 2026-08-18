@@ -14,6 +14,28 @@ from .scan_logs import MAX_REPORTED_ERRORS, ScanRunLog
 from .utils import get_system_info
 
 
+# These values are returned in os.stat_result.st_file_attributes on Windows.
+# Keep them here because Python does not expose the newer constants on every
+# supported version.
+_FILE_ATTRIBUTE_OFFLINE = 0x00001000
+_FILE_ATTRIBUTE_PINNED = 0x00080000
+_FILE_ATTRIBUTE_UNPINNED = 0x00100000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+
+
+def get_cloud_state(stat_result):
+    """Return a coarse Windows cloud-file state without another system call."""
+    attributes = getattr(stat_result, 'st_file_attributes', 0)
+    if attributes & (_FILE_ATTRIBUTE_OFFLINE |
+                     _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
+        return 'not_fully_local'
+    if attributes & _FILE_ATTRIBUTE_PINNED:
+        return 'pinned'
+    if attributes & _FILE_ATTRIBUTE_UNPINNED:
+        return 'evictable'
+    return None
+
+
 def _normalize_prefix(path):
     """Normalize a path for prefix comparisons (no symlink resolution)."""
     return os.path.normcase(os.path.abspath(path))
@@ -93,7 +115,8 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None,
         'd': [drive[:2] for drive in drives],
         't': [],
         'T': [],
-        's': []
+        's': [],
+        'c': []
     }
 
     # Get timestamps for each drive
@@ -180,7 +203,8 @@ def scan(path, counters, result_callback=None, skip_prefixes=None,
                 'd': [],
                 't': [],
                 'T': [],
-                's': []
+                's': [],
+                'c': []
             }
 
             for file in files:
@@ -191,6 +215,7 @@ def scan(path, counters, result_callback=None, skip_prefixes=None,
                     stat = os.stat(file_path)
                     path_obj['f'].append(file)
                     path_obj['s'].append(stat.st_size)
+                    path_obj['c'].append(get_cloud_state(stat))
                     path_obj['t'].append([
                         int(stat.st_ctime),
                         int(stat.st_mtime),

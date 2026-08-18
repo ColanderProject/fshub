@@ -1,5 +1,6 @@
 """Tests for scanning, backup and hashing."""
 
+import gzip
 import json
 import os
 import threading
@@ -24,6 +25,26 @@ from fshub.scan_logs import (
 from fshub.scanning import is_related_path, run_scan_to_snapshot
 
 
+@pytest.mark.parametrize('attributes,expected', [
+    (0, None),
+    (scanning._FILE_ATTRIBUTE_PINNED, 'pinned'),
+    (scanning._FILE_ATTRIBUTE_UNPINNED, 'evictable'),
+    (scanning._FILE_ATTRIBUTE_OFFLINE, 'not_fully_local'),
+    (scanning._FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, 'not_fully_local'),
+    (scanning._FILE_ATTRIBUTE_PINNED |
+     scanning._FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, 'not_fully_local'),
+])
+def test_cloud_state_uses_existing_windows_file_attributes(attributes, expected):
+    class StatResult:
+        st_file_attributes = attributes
+
+    assert scanning.get_cloud_state(StatResult()) == expected
+
+
+def test_cloud_state_is_unknown_without_windows_attributes():
+    assert scanning.get_cloud_state(object()) is None
+
+
 @pytest.mark.parametrize('a,b,expected', [
     ('/home/a', '/home/a', True),
     ('/home/a', '/home/a/b', True),
@@ -41,6 +62,15 @@ def test_scan_counters_accumulate(config, sample_tree):
     assert counters['scanned_count'] == 3
     assert counters['scanned_size'] == 60
     assert counters['errors'] == []
+
+
+def test_scan_snapshot_keeps_cloud_state_aligned_with_files(config, sample_tree):
+    result = run_scan_to_snapshot(str(sample_tree))
+    with gzip.open(result['result_path'], 'rt', encoding='utf-8') as snapshot:
+        records = [json.loads(line) for line in snapshot]
+
+    assert all(len(record['c']) == len(record['f']) for record in records)
+    assert all(state is None for record in records for state in record['c'])
 
 
 def test_scan_skip_prefixes(config, sample_tree):

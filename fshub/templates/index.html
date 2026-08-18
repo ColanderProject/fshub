@@ -192,6 +192,7 @@
                                 <tr>
                                     <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="size">Size <span class="sort-indicator"></span></th>
+                                    <th>Cloud State</th>
                                     <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
@@ -2925,7 +2926,7 @@
             if (filesForPage.length === 0) {
                 const row = document.createElement('tr');
                 const cell = document.createElement('td');
-                cell.setAttribute('colspan', '6');
+                cell.setAttribute('colspan', '7');
                 cell.textContent = 'No files match the filter.';
                 cell.className = 'text-center';
                 row.appendChild(cell);
@@ -2949,6 +2950,13 @@
                     const sizeCell = document.createElement('td');
                     sizeCell.textContent = file.size_formatted;
                     row.appendChild(sizeCell);
+
+                    const cloudLabels = {
+                        pinned: 'Pinned',
+                        not_fully_local: 'Not fully local',
+                        evictable: 'Evictable'
+                    };
+                    row.appendChild(createTextCell(cloudLabels[file.cloud_state] || '—'));
 
                     // Timestamp cells
                     row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));
