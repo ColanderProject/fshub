@@ -7,9 +7,16 @@ import traceback
 import uuid
 from datetime import datetime
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from ..config import get_config
+from ..scan_logs import (
+    MAX_REPORTED_ERRORS,
+    ScanRunLog,
+    list_scan_statuses,
+    read_scan_log_page,
+    read_scan_status,
+)
 from ..scanning import is_related_path, run_scan_to_snapshot
 from . import json_body
 from .explorer import list_snapshot_files
@@ -29,7 +36,7 @@ def _prune_finished_scans():
     finished = [
         (info['start_time'], scan_id)
         for scan_id, info in running_scans.items()
-        if info['status'] in ('completed', 'error')
+        if info['status'] in ('completed', 'completed_with_errors', 'error')
     ]
     if len(finished) <= MAX_FINISHED_SCANS:
         return
@@ -75,6 +82,8 @@ def start_scan():
 
         scan_id = str(uuid.uuid4())
         counters = {}
+        run_log = ScanRunLog(scan_id)
+        run_log.started(scan_path, use_index=use_index, skip_paths=skip_paths)
 
         def run_scan():
             try:
@@ -83,6 +92,7 @@ def start_scan():
                     use_index=use_index,
                     counters=counters,
                     skip_prefixes=skip_paths,
+                    run_log=run_log,
                 )
             except Exception as e:  # noqa: BLE001 - surfaced to the caller below
                 traceback.print_exc()
@@ -90,46 +100,114 @@ def start_scan():
                     if scan_id in running_scans:
                         running_scans[scan_id]['status'] = 'error'
                         running_scans[scan_id]['error'] = str(e)
+                        running_scans[scan_id]['finish_time'] = int(
+                            datetime.now().timestamp())
                 return
 
             with scan_lock:
                 if scan_id in running_scans:
-                    running_scans[scan_id]['status'] = 'completed'
+                    running_scans[scan_id]['status'] = (
+                        'completed_with_errors' if counters.get('error_count', 0)
+                        else 'completed')
                     running_scans[scan_id]['result_file'] = result['result_file']
                     running_scans[scan_id]['counters'] = counters
+                    running_scans[scan_id]['finish_time'] = int(
+                        datetime.now().timestamp())
 
         thread = threading.Thread(target=run_scan, daemon=True)
         running_scans[scan_id] = {
             'path': scan_path,
             'status': 'running',
-            'start_time': int(datetime.now().timestamp()),
+            'start_time': run_log.start_time,
             'counters': counters,
             'error': None,
+            'finish_time': None,
+            'run_log': run_log,
         }
         thread.start()
 
     return jsonify({'scan_id': scan_id, 'status': 'started'})
 
 
+def _task_payload(scan_id, scan_info):
+    source = scan_info['counters']
+    errors = list(source.get('errors', []))[:MAX_REPORTED_ERRORS]
+    counters = {
+        'current_path': source.get('current_path', scan_info['path']),
+        'scanned_count': source.get('scanned_count', 0),
+        'scanned_size': source.get('scanned_size', 0),
+        'error_count': source.get('error_count', len(errors)),
+        'errors': errors,
+    }
+    return {
+        'scan_id': scan_id,
+        'path': scan_info['path'],
+        'status': scan_info['status'],
+        'start_time': scan_info['start_time'],
+        'finish_time': scan_info.get('finish_time'),
+        'counters': counters,
+        'error': scan_info.get('error'),
+        'result_file': scan_info.get('result_file'),
+        'log_available': scan_info['run_log'].available,
+    }
+
+
 @scan_bp.route('/api/v1/scan/<scan_id>', methods=['GET'])
 def get_scan_status(scan_id):
-    """Get the status of a scan"""
+    """Get live status, falling back to its durable log after a restart."""
     with scan_lock:
         scan_info = running_scans.get(scan_id)
-        if scan_info is None:
-            return jsonify({'error': 'Scan ID not found'}), 404
+        if scan_info is not None:
+            return jsonify(_task_payload(scan_id, scan_info))
 
-        payload = {
-            'scan_id': scan_id,
-            'path': scan_info['path'],
-            'status': scan_info['status'],
-            'start_time': scan_info['start_time'],
-            'counters': dict(scan_info['counters']),
-            'error': scan_info.get('error'),
-            'result_file': scan_info.get('result_file'),
-        }
+    try:
+        status = read_scan_status(scan_id)
+    except ValueError:
+        status = None
+    if status is None:
+        return jsonify({'error': 'Scan ID not found'}), 404
+    return jsonify(status)
 
-    return jsonify(payload)
+
+@scan_bp.route('/api/v1/scan-tasks', methods=['GET'])
+def get_scan_tasks():
+    """List live tasks plus the 50 newest compact status sidecars."""
+    durable = {item['scan_id']: item for item in list_scan_statuses()}
+    with scan_lock:
+        for scan_id, scan_info in running_scans.items():
+            durable[scan_id] = _task_payload(scan_id, scan_info)
+    scans = sorted(
+        durable.values(),
+        key=lambda item: item.get('start_time') or 0,
+        reverse=True,
+    )
+    return jsonify({'scans': scans})
+
+
+@scan_bp.route('/api/v1/scan/<scan_id>/log', methods=['GET'])
+def get_scan_log(scan_id):
+    """Return one bounded page of durable scan-log records."""
+    try:
+        cursor = int(request.args.get('cursor', 0))
+        limit = int(request.args.get('limit', 200))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'cursor and limit must be integers'}), 400
+    if cursor < 0 or not 1 <= limit <= 500:
+        return jsonify({'error': 'cursor must be non-negative and limit must be 1-500'}), 400
+
+    try:
+        page = read_scan_log_page(scan_id, cursor=cursor, limit=limit)
+    except ValueError:
+        page = None
+    if page is None:
+        return jsonify({'error': 'Scan ID not found'}), 404
+    records, next_cursor, has_more = page
+    return jsonify({
+        'scan_id': scan_id,
+        'records': records,
+        'next_cursor': next_cursor,
+        'has_more': has_more,
+    })
 
 
 @scan_bp.route('/api/v1/scans', methods=['GET'])

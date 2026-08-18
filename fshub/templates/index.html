@@ -100,6 +100,11 @@
                             <input class="form-check-input" type="checkbox" id="recursive-calc-check" disabled>
                             <label class="form-check-label" for="recursive-calc-check">Recalculate sizes & counts based on filter</label>
                         </div>
+                        <div class="form-check mt-2">
+                            <input class="form-check-input" type="checkbox" id="local-only-stats-check">
+                            <label class="form-check-label" for="local-only-stats-check">Count fully local files only</label>
+                            <div class="form-text">Excludes files marked “Not fully local”; sizes remain logical file sizes.</div>
+                        </div>
                     </div>
 
                     <div>
@@ -110,6 +115,7 @@
                     <div class="path-breadcrumb">
                         <button class="btn btn-sm btn-outline-secondary me-2" id="back-btn" style="display:none;">Back</button>
                         <span id="current-path">/</span>
+                        <div id="path-stats" class="small text-muted mt-1"></div>
                     </div>
 
                     <div id="dirs-container">
@@ -142,8 +148,8 @@
                             <thead>
                                 <tr>
                                     <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
-                                    <th class="sortable-header" data-column="size">Total Size <span class="sort-indicator"></span></th>
-                                    <th class="sortable-header" data-column="files">Total Files <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="size"><span id="dirs-size-heading">Total Size</span> <span class="sort-indicator"></span></th>
+                                    <th class="sortable-header" data-column="files"><span id="dirs-files-heading">Total Files</span> <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
@@ -192,6 +198,7 @@
                                 <tr>
                                     <th class="sortable-header" data-column="name">Name <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="size">Size <span class="sort-indicator"></span></th>
+                                    <th>Cloud State</th>
                                     <th class="sortable-header" data-column="created">Created <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="modified">Modified <span class="sort-indicator"></span></th>
                                     <th class="sortable-header" data-column="accessed">Accessed <span class="sort-indicator"></span></th>
@@ -221,6 +228,29 @@
                     <button class="btn btn-primary mt-2" id="start-scan">Start Scan</button>
                 </div>
                 
+                <div id="scan-tasks" class="mb-4">
+                    <div class="d-flex align-items-center justify-content-between">
+                        <h4>Scan Status</h4>
+                        <button class="btn btn-sm btn-outline-secondary" id="refresh-scan-tasks">Refresh</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>Path</th>
+                                    <th>Status</th>
+                                    <th>Files / Size</th>
+                                    <th>Errors</th>
+                                    <th>Current path</th>
+                                    <th>Started</th>
+                                    <th>Log</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scan-tasks-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div id="scan-results">
                     <h4>Scan Results</h4>
                     <table class="table">
@@ -494,6 +524,28 @@
         </div>
     </div>
 
+    <!-- Scan Log Popup -->
+    <div id="scan-log-modal" class="modal fade" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Scan Log</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="scan-log-id" class="text-muted small mb-2"></div>
+                    <div class="table-responsive">
+                        <table class="table table-sm">
+                            <thead><tr><th>Time</th><th>Event</th><th>Details</th></tr></thead>
+                            <tbody id="scan-log-tbody"></tbody>
+                        </table>
+                    </div>
+                    <button class="btn btn-sm btn-outline-primary" id="scan-log-more" hidden>Load more</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Filename Popup -->
     <div id="filename-popup" class="modal fade" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
@@ -514,6 +566,7 @@
         // Global variables
         let currentSnapshot = null;
         let currentPath = '/';
+        let currentPathStats = null;
         let pathHistory = [];  // Stack for path navigation history
         let dirsVisible = true;
         let filesVisible = true;
@@ -530,6 +583,9 @@
         let backupInterval = null; // Interval for checking backup progress
         let backupType = null; // Current backup type (zip or folder)
         let onboardingShown = false; // Whether we already jumped to the devices tab
+        let scanPollInterval = null; // Poll while the Scanner tab is visible
+        let currentScanLogId = null;
+        let scanLogCursor = 0;
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -541,6 +597,17 @@
             document.getElementById('toggle-dirs').addEventListener('click', toggleDirs);
             document.getElementById('toggle-files').addEventListener('click', toggleFiles);
             document.getElementById('start-scan').addEventListener('click', startScan);
+            document.getElementById('local-only-stats-check').addEventListener('change', () => {
+                updateLocalStatsDisplay();
+                sortDirectories(dirsSortColumn, true);
+            });
+            document.getElementById('scan-log-more').addEventListener('click', loadScanLogPage);
+            document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
+                loadScanTasks();
+                loadScanResults();
+            });
+            document.getElementById('scanner-tab').addEventListener('shown.bs.tab', startScanPolling);
+            document.getElementById('scanner-tab').addEventListener('hidden.bs.tab', stopScanPolling);
             document.getElementById('search-btn').addEventListener('click', performSearch);
             // document.getElementById('create-zip-backup').addEventListener('click', createZipBackup);
             // document.getElementById('create-folder-backup').addEventListener('click', createFolderBackup);
@@ -825,6 +892,8 @@
                 // Store original data for sorting, filtering, and paging
                 originalDirs = [...data.dirs];
                 originalFiles = [...data.files];
+                currentPathStats = data;
+                updateLocalStatsDisplay();
 
                 // Reset pagination
                 currentDirsPage = 1;
@@ -1121,13 +1190,162 @@
             
             if (response.ok) {
                 alert(`Scan started with ID: ${data.scan_id}`);
-                // Refresh the scan results after a delay
-                setTimeout(loadScanResults, 2000);
+                startScanPolling();
             } else {
                 alert('Scan failed: ' + data.error);
             }
         }
         
+        async function startScanPolling() {
+            stopScanPolling();
+            const hasRunningScan = await loadScanTasks();
+            loadScanResults();
+            if (hasRunningScan) {
+                scanPollInterval = setInterval(async () => {
+                    const stillRunning = await loadScanTasks();
+                    if (!stillRunning) {
+                        loadScanResults();
+                        stopScanPolling();
+                    }
+                }, 3000);
+            }
+        }
+
+        function stopScanPolling() {
+            if (scanPollInterval) {
+                clearInterval(scanPollInterval);
+                scanPollInterval = null;
+            }
+        }
+
+        function scanStatusBadge(status) {
+            const classes = {
+                running: 'text-bg-primary',
+                completed: 'text-bg-success',
+                completed_with_errors: 'text-bg-warning',
+                error: 'text-bg-danger',
+                interrupted: 'text-bg-warning'
+            };
+            const badge = document.createElement('span');
+            badge.className = `badge ${classes[status] || 'text-bg-secondary'}`;
+            badge.textContent = status;
+            return badge;
+        }
+
+        // Load live and persisted scan tasks. Persisted entries remain visible
+        // after the web process is restarted.
+        async function loadScanTasks() {
+            const response = await fetch('/api/v1/scan-tasks', {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+            if (!response.ok) return false;
+
+            const data = await response.json();
+            const tbody = document.getElementById('scan-tasks-tbody');
+            tbody.innerHTML = '';
+
+            data.scans.forEach(scan => {
+                const counters = scan.counters || {};
+                const row = document.createElement('tr');
+
+                const pathCell = document.createElement('td');
+                pathCell.className = 'filename-cell';
+                pathCell.textContent = scan.path || '';
+                pathCell.title = scan.path || '';
+                row.appendChild(pathCell);
+
+                const statusCell = document.createElement('td');
+                statusCell.appendChild(scanStatusBadge(scan.status));
+                if (scan.error) statusCell.title = scan.error;
+                row.appendChild(statusCell);
+
+                const progressCell = document.createElement('td');
+                progressCell.textContent = `${counters.scanned_count || 0} / ${formatBytes(counters.scanned_size || 0)}`;
+                row.appendChild(progressCell);
+
+                const errorsCell = document.createElement('td');
+                errorsCell.textContent = String(counters.error_count ?? (counters.errors || []).length);
+                row.appendChild(errorsCell);
+
+                const currentCell = document.createElement('td');
+                currentCell.className = 'filename-cell';
+                currentCell.textContent = counters.current_path || '';
+                currentCell.title = counters.current_path || '';
+                row.appendChild(currentCell);
+
+                const startedCell = document.createElement('td');
+                startedCell.textContent = scan.start_time ? formatTimestamp(scan.start_time) : '';
+                row.appendChild(startedCell);
+
+                const logCell = document.createElement('td');
+                const logButton = document.createElement('button');
+                logButton.className = 'btn btn-sm btn-outline-primary';
+                logButton.textContent = 'View';
+                logButton.disabled = !scan.log_available;
+                logButton.addEventListener('click', () => showScanLog(scan.scan_id));
+                logCell.appendChild(logButton);
+                row.appendChild(logCell);
+
+                tbody.appendChild(row);
+            });
+            return data.scans.some(scan => scan.status === 'running');
+        }
+
+        function scanLogDetails(record) {
+            const counters = record.counters || {};
+            if (record.event === 'started') {
+                return `Path: ${record.path}; skipped: ${(record.skip_paths || []).join(', ') || 'none'}`;
+            }
+            if (record.event === 'scan_error') return record.message || '';
+            if (record.event === 'failed') return record.error || '';
+            if (record.event === 'completed') {
+                return `Snapshot: ${record.result_file}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
+            }
+            return `Current: ${counters.current_path || ''}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
+        }
+
+        async function loadScanLogPage() {
+            const moreButton = document.getElementById('scan-log-more');
+            moreButton.disabled = true;
+            const params = new URLSearchParams({cursor: scanLogCursor, limit: 200});
+            const response = await fetch(
+                `/api/v1/scan/${encodeURIComponent(currentScanLogId)}/log?${params}`,
+                {method: 'GET', credentials: 'same-origin'}
+            );
+            const data = await response.json();
+            moreButton.disabled = false;
+            if (!response.ok) {
+                alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
+                return false;
+            }
+
+            const tbody = document.getElementById('scan-log-tbody');
+            data.records.forEach(record => {
+                const row = document.createElement('tr');
+                [formatTimestamp(record.timestamp), record.event, scanLogDetails(record)].forEach(value => {
+                    const cell = document.createElement('td');
+                    cell.textContent = value;
+                    row.appendChild(cell);
+                });
+                tbody.appendChild(row);
+            });
+            scanLogCursor = data.next_cursor;
+            moreButton.hidden = !data.has_more;
+            return true;
+        }
+
+        async function showScanLog(scanId) {
+            currentScanLogId = scanId;
+            scanLogCursor = 0;
+            document.getElementById('scan-log-id').textContent = scanId;
+            document.getElementById('scan-log-tbody').innerHTML = '';
+            if (await loadScanLogPage()) {
+                bootstrap.Modal.getOrCreateInstance(
+                    document.getElementById('scan-log-modal')).show();
+            }
+        }
+
         // Load scan results
         async function loadScanResults() {
             const response = await fetch('/api/v1/scans', {
@@ -2446,6 +2664,38 @@
             });
         }
 
+        function useLocalStats() {
+            return document.getElementById('local-only-stats-check').checked;
+        }
+
+        function displayedDirectorySize(directory) {
+            return useLocalStats() ? directory.local_size : directory.S;
+        }
+
+        function displayedDirectoryCount(directory) {
+            return useLocalStats() ? directory.local_file_count : directory.C;
+        }
+
+        function updateLocalStatsDisplay() {
+            const localOnly = useLocalStats();
+            document.getElementById('dirs-size-heading').textContent =
+                localOnly ? 'Fully Local Size' : 'Total Size';
+            document.getElementById('dirs-files-heading').textContent =
+                localOnly ? 'Fully Local Files' : 'Total Files';
+
+            const stats = document.getElementById('path-stats');
+            if (!currentPathStats) {
+                stats.textContent = '';
+                return;
+            }
+            const size = localOnly ? currentPathStats.local_size : currentPathStats.S;
+            const count = localOnly
+                ? currentPathStats.local_file_count
+                : currentPathStats.C;
+            const label = localOnly ? 'Fully local' : 'All files';
+            stats.textContent = `${label}: ${count || 0} files, ${formatBytes(size || 0)}`;
+        }
+
         // Sorting functions
         function sortDirectories(column, set=false) {
             if (!set) {
@@ -2476,16 +2726,16 @@
                             return valB.localeCompare(valA);
                         }
                     case 'size':
-                        valA = a.S || 0;
-                        valB = b.S || 0;
+                        valA = displayedDirectorySize(a) || 0;
+                        valB = displayedDirectorySize(b) || 0;
                         if (dirsSortDirection === 'asc') {
                             return valA - valB;
                         } else {
                             return valB - valA;
                         }
                     case 'files':
-                        valA = a.C || 0;
-                        valB = b.C || 0;
+                        valA = displayedDirectoryCount(a) || 0;
+                        valB = displayedDirectoryCount(b) || 0;
                         if (dirsSortDirection === 'asc') {
                             return valA - valB;
                         } else {
@@ -2675,8 +2925,9 @@
                     nameCell.appendChild(nameLink);
 
                     row.appendChild(nameCell);
-                    row.appendChild(createTextCell(formatBytes(dir.S) || '0 Bytes')); // Total Size
-                    row.appendChild(createTextCell(dir.C || 0)); // Total Files
+                    row.appendChild(createTextCell(
+                        formatBytes(displayedDirectorySize(dir) || 0)));
+                    row.appendChild(createTextCell(displayedDirectoryCount(dir) || 0));
                     row.appendChild(createTextCell(formatTimestamp(dir.created) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.modified) || 'N/A'));
                     row.appendChild(createTextCell(formatTimestamp(dir.accessed) || 'N/A'));
@@ -2740,7 +2991,7 @@
             if (filesForPage.length === 0) {
                 const row = document.createElement('tr');
                 const cell = document.createElement('td');
-                cell.setAttribute('colspan', '6');
+                cell.setAttribute('colspan', '7');
                 cell.textContent = 'No files match the filter.';
                 cell.className = 'text-center';
                 row.appendChild(cell);
@@ -2764,6 +3015,13 @@
                     const sizeCell = document.createElement('td');
                     sizeCell.textContent = file.size_formatted;
                     row.appendChild(sizeCell);
+
+                    const cloudLabels = {
+                        pinned: 'Pinned',
+                        not_fully_local: 'Not fully local',
+                        evictable: 'Evictable'
+                    };
+                    row.appendChild(createTextCell(cloudLabels[file.cloud_state] || '—'));
 
                     // Timestamp cells
                     row.appendChild(createTextCell(formatTimestamp(file.created) || 'N/A'));

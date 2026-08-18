@@ -7,6 +7,8 @@ fshub is a Python package for managing files across multiple devices. It provide
 - Web-based file explorer with recursive directory size / file counts
 - Device management
 - File scanning and hashing (including duplicate detection)
+- Coarse Windows cloud-file state (`pinned`, `not_fully_local`, `evictable`),
+  with an Explorer toggle to count fully local files only
 - Group management (include/exclude filters)
 - Backup to a folder or to split zip archives
 - Cross-platform support (Windows and Linux)
@@ -85,6 +87,7 @@ Everything lives under `data_path`:
 ~/.fshub/
 ├── snapshots/   # snapshot_<ts>_<count>_<uuid>.jsonl.gz and their *_groups.jl logs
 ├── devices/     # devices_<host>.jl, media_<host>.jl
+├── scan_logs/   # detailed JSONL logs plus compact latest-status sidecars
 └── backups/     # one JSONL log per backup run
 ```
 
@@ -95,6 +98,19 @@ than overwriting the previous one — even for two runs started within the same
 second. A run that could not copy every selected file finishes as
 `completed_with_errors` and reports `failed_files`/`errors`; it never claims
 success.
+
+Web scans are asynchronous. The Scanner tab polls while a scan is running and
+lists the 50 newest runs. `GET /api/v1/scan-tasks` lists them,
+`GET /api/v1/scan/<scan_id>` returns one status, and
+`GET /api/v1/scan/<scan_id>/log` returns its lifecycle/progress/error records
+in bounded cursor pages (`cursor`, `limit`; maximum 500 records).
+Web and CLI scans both write append-only detailed logs and small status
+sidecars under `scan_logs/`. Access errors are written through one open handle
+and flushed without `fsync`; the status API returns their total count and at most
+20 messages, while the log endpoint returns the details. Status remains
+queryable after a restart. A partial scan finishes as
+`completed_with_errors`; a non-terminal status left by a killed process is
+reported as `interrupted`.
 
 Hashing is also asynchronous so a large snapshot does not occupy a web
 worker. `POST /api/v1/hash/calculate` and `POST /api/v1/hash/duplicates`

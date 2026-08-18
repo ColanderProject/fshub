@@ -55,7 +55,7 @@ What the application *is* responsible for:
 
 `fshub.config.get_config()` returns a process-wide singleton. Never construct
 `Config()` per request — the file is parsed once at startup. Derived paths are
-properties: `snapshot_dir`, `devices_dir`, `backup_log_dir`.
+properties: `snapshot_dir`, `devices_dir`, `backup_log_dir`, `scan_log_dir`.
 
 ## Snapshot format
 
@@ -67,10 +67,16 @@ A snapshot is a gzipped JSONL file, one record per directory:
 | `f` | file names                                 |
 | `s` | file sizes, parallel to `f`                |
 | `t` | file `[ctime, mtime, atime]`, parallel to `f` |
+| `c` | coarse cloud state, parallel to `f` (`null` for normal/unknown files) |
 | `d` | subdirectory names                         |
 | `T` | subdirectory `[ctime, mtime, atime]`, parallel to `d` |
 
-All timestamps are Unix integers. The first record additionally carries the
+All timestamps are Unix integers. On Windows, `c` is derived from the
+`st_file_attributes` already returned by `os.stat`; it does not add another
+per-file system call. Values are `pinned`, `not_fully_local`, `evictable`, or
+`null`. This is intentionally coarse: `UNPINNED` means Windows may evict a file,
+not that it currently occupies no local space. Older snapshots without `c`
+load with a `null` cloud state. The first record additionally carries the
 device info of the machine that produced it (`device_name`, `os_name`,
 `thumbprint`, `start_scan_time`, ...).
 
@@ -80,8 +86,11 @@ device info of the machine that produced it (`device_name`, `os_name`,
 
 ### Computed fields
 
-On load, `S` (total size) and `C` (total file count) are computed for every
-directory, *including subdirectories*. This is done iteratively in
+On load, `S` (total logical size) and `C` (total file count) are computed for
+every directory, *including subdirectories*. `LS` and `LC` contain the same
+totals after excluding files whose cloud state is `not_fully_local`; the UI's
+“Count fully local files only” checkbox switches to these values. `LS` remains
+a logical-size total, not NTFS allocated bytes. These totals are computed iteratively in
 `_compute_recursive_totals`: an explicit child→parent map plus a memoised
 depth sort. Do not turn this back into a recursive walk — real trees exceed
 Python's recursion limit, and the Windows "This PC" root (`/` → `C:\`) has no
@@ -144,6 +153,15 @@ Flask serves requests from multiple threads. Shared mutable state is guarded:
 Both scan and backup task registries prune finished entries so they cannot
 grow without bound. Worker threads catch exceptions and report them through
 the task's `status`/`error` fields — never leave a task stuck in `running`.
+
+Every scan has an append-only `scan_logs/<scan_id>.jsonl` detail log and a
+small `<scan_id>.status.json` sidecar. The list API reads at most the 50 newest
+sidecars instead of parsing historical logs, and the detail API uses bounded
+byte-cursor pages rather than materializing an entire JSONL file. Access errors are counted without
+limit but only 20 messages are kept in task status; all messages go to the log,
+whose open handle is flushed without `fsync`. Logging failures never fail a scan.
+A non-terminal sidecar is presented as `interrupted` after restart. Keep scan
+IDs as server-generated canonical UUIDs because they are used as filenames.
 
 A backup worker only moves `started` → `running` when the task is still
 `started` (compare-and-set), so a stop request that arrives before the thread

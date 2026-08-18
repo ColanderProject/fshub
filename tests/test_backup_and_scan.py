@@ -1,8 +1,11 @@
 """Tests for scanning, backup and hashing."""
 
+import gzip
 import json
 import os
+import threading
 import time
+import uuid
 
 import pytest
 
@@ -11,7 +14,35 @@ from conftest import select_all_files, wait_for_hash_task, wait_for_task
 from fshub import scanning
 from fshub.api import backup as backup_module
 from fshub.api import hashes as hashes_module
+from fshub.api import scans as scans_module
+from fshub.scan_logs import (
+    MAX_REPORTED_ERRORS,
+    ScanRunLog,
+    list_scan_statuses,
+    read_scan_log,
+    read_scan_status,
+)
 from fshub.scanning import is_related_path, run_scan_to_snapshot
+
+
+@pytest.mark.parametrize('attributes,expected', [
+    (0, None),
+    (scanning._FILE_ATTRIBUTE_PINNED, 'pinned'),
+    (scanning._FILE_ATTRIBUTE_UNPINNED, 'evictable'),
+    (scanning._FILE_ATTRIBUTE_OFFLINE, 'not_fully_local'),
+    (scanning._FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, 'not_fully_local'),
+    (scanning._FILE_ATTRIBUTE_PINNED |
+     scanning._FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, 'not_fully_local'),
+])
+def test_cloud_state_uses_existing_windows_file_attributes(attributes, expected):
+    class StatResult:
+        st_file_attributes = attributes
+
+    assert scanning.get_cloud_state(StatResult()) == expected
+
+
+def test_cloud_state_is_unknown_without_windows_attributes():
+    assert scanning.get_cloud_state(object()) is None
 
 
 @pytest.mark.parametrize('a,b,expected', [
@@ -31,6 +62,15 @@ def test_scan_counters_accumulate(config, sample_tree):
     assert counters['scanned_count'] == 3
     assert counters['scanned_size'] == 60
     assert counters['errors'] == []
+
+
+def test_scan_snapshot_keeps_cloud_state_aligned_with_files(config, sample_tree):
+    result = run_scan_to_snapshot(str(sample_tree))
+    with gzip.open(result['result_path'], 'rt', encoding='utf-8') as snapshot:
+        records = [json.loads(line) for line in snapshot]
+
+    assert all(len(record['c']) == len(record['f']) for record in records)
+    assert all(state is None for record in records for state in record['c'])
 
 
 def test_scan_skip_prefixes(config, sample_tree):
@@ -88,6 +128,16 @@ def test_cli_scan_rejects_a_file(tmp_path):
     assert 'Not a directory' in result.output
 
 
+def test_cli_reports_full_scan_log_path(config, sample_tree):
+    from click.testing import CliRunner
+
+    from fshub.main import cli
+
+    result = CliRunner().invoke(cli, ['scan', str(sample_tree)])
+    assert result.exit_code == 0
+    assert f"Scan log saved as {config.scan_log_dir}" in result.output
+
+
 def test_scan_endpoint_reports_status(client, sample_tree):
     response = client.post('/api/v1/scan', json={'path': str(sample_tree)})
     assert response.status_code == 200
@@ -106,6 +156,230 @@ def test_scan_endpoint_reports_status(client, sample_tree):
 
 def test_unknown_scan_id_is_404(client):
     assert client.get('/api/v1/scan/nope').status_code == 404
+
+
+def test_scan_status_and_log_survive_registry_loss(client, sample_tree):
+    response = client.post('/api/v1/scan', json={'path': str(sample_tree)})
+    scan_id = response.get_json()['scan_id']
+
+    for _ in range(100):
+        status = client.get(f'/api/v1/scan/{scan_id}').get_json()
+        if status['status'] != 'running':
+            break
+        time.sleep(0.02)
+    assert status['status'] == 'completed'
+
+    listing = client.get('/api/v1/scan-tasks').get_json()['scans']
+    assert any(item['scan_id'] == scan_id for item in listing)
+    log = client.get(f'/api/v1/scan/{scan_id}/log').get_json()['records']
+    assert log[0]['event'] == 'started'
+    assert any(record['event'] == 'progress' for record in log)
+    assert log[-1]['event'] == 'completed'
+
+    # Simulate a process restart: status comes from the compact sidecar.
+    with scans_module.scan_lock:
+        scans_module.running_scans.pop(scan_id, None)
+    restored = client.get(f'/api/v1/scan/{scan_id}').get_json()
+    assert restored['status'] == 'completed'
+    assert restored['result_file'] == status['result_file']
+
+
+def test_scan_access_errors_are_written_immediately(config, sample_tree, monkeypatch):
+    inaccessible = str(sample_tree / 'a.txt')
+    real_stat = scanning.os.stat
+
+    def failing_stat(path, *args, **kwargs):
+        if str(path) == inaccessible:
+            raise PermissionError('test denied')
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanning.os, 'stat', failing_stat)
+    result = run_scan_to_snapshot(str(sample_tree))
+    records = read_scan_log(result['scan_id'])
+
+    errors = [record for record in records if record['event'] == 'scan_error']
+    assert len(errors) == 1
+    assert inaccessible in errors[0]['message']
+    assert 'test denied' in errors[0]['message']
+    assert records[-1]['event'] == 'completed'
+    assert records[-1]['counters']['error_count'] == 1
+    assert read_scan_status(result['scan_id'])['status'] == 'completed_with_errors'
+
+
+def test_scan_log_exists_before_worker_runs(client, sample_tree, monkeypatch):
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    real_run = scans_module.run_scan_to_snapshot
+
+    def blocked_run(*args, **kwargs):
+        worker_entered.set()
+        release_worker.wait(timeout=2)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(scans_module, 'run_scan_to_snapshot', blocked_run)
+    response = client.post('/api/v1/scan', json={'path': str(sample_tree)})
+    scan_id = response.get_json()['scan_id']
+    assert worker_entered.wait(timeout=1)
+
+    status = client.get(f'/api/v1/scan/{scan_id}').get_json()
+    log_response = client.get(f'/api/v1/scan/{scan_id}/log')
+    assert status['log_available'] is True
+    assert log_response.status_code == 200
+    assert log_response.get_json()['records'][0]['event'] == 'started'
+
+    release_worker.set()
+    for _ in range(100):
+        if client.get(f'/api/v1/scan/{scan_id}').get_json()['status'] != 'running':
+            break
+        time.sleep(0.02)
+
+
+def test_unfinished_and_failed_scan_statuses_are_restored(client):
+    interrupted = ScanRunLog()
+    interrupted.started('/interrupted')
+    interrupted_id = interrupted.scan_id
+    interrupted.close()
+
+    failed = ScanRunLog()
+    failed.started('/failed')
+    failed.failed(RuntimeError('boom'), {
+        'current_path': '/failed/child',
+        'scanned_count': 2,
+        'scanned_size': 12,
+        'error_count': 0,
+        'errors': [],
+    })
+
+    interrupted_status = client.get(
+        f'/api/v1/scan/{interrupted_id}').get_json()
+    failed_status = client.get(f'/api/v1/scan/{failed.scan_id}').get_json()
+    assert interrupted_status['status'] == 'interrupted'
+    assert interrupted_status['finish_time'] is None
+    assert failed_status['status'] == 'error'
+    assert failed_status['finish_time'] is not None
+    assert failed_status['result_file'] is None
+    assert failed_status['error'] == 'boom'
+
+
+def test_live_and_restored_status_have_the_same_shape(client, sample_tree):
+    response = client.post('/api/v1/scan', json={'path': str(sample_tree)})
+    scan_id = response.get_json()['scan_id']
+    for _ in range(100):
+        live = client.get(f'/api/v1/scan/{scan_id}').get_json()
+        if live['status'] != 'running':
+            break
+        time.sleep(0.02)
+
+    with scans_module.scan_lock:
+        scans_module.running_scans.pop(scan_id, None)
+    restored = client.get(f'/api/v1/scan/{scan_id}').get_json()
+    assert set(restored) == set(live)
+    assert set(restored['counters']) == set(live['counters'])
+
+
+def test_scan_errors_are_bounded_in_status_but_complete_in_log(config, client):
+    run_log = ScanRunLog()
+    run_log.started('/many-errors')
+    counters = {
+        'current_path': '/many-errors',
+        'scanned_count': 0,
+        'scanned_size': 0,
+        'error_count': 0,
+        'errors': [],
+    }
+    for index in range(MAX_REPORTED_ERRORS + 5):
+        scanning._record_error(counters, f'error {index}', run_log.scan_error)
+    run_log.completed(counters, 'snapshot.jsonl.gz')
+
+    status = read_scan_status(run_log.scan_id)
+    records = read_scan_log(run_log.scan_id)
+    assert status['counters']['error_count'] == MAX_REPORTED_ERRORS + 5
+    assert len(status['counters']['errors']) == MAX_REPORTED_ERRORS
+    assert len([item for item in records
+                if item['event'] == 'scan_error']) == MAX_REPORTED_ERRORS + 5
+
+    listing = client.get('/api/v1/scan-tasks').get_json()['scans']
+    listed = next(item for item in listing
+                  if item['scan_id'] == run_log.scan_id)
+    assert listed['counters'] == status['counters']
+
+
+def test_scan_log_endpoint_is_cursor_paginated(config, client):
+    run_log = ScanRunLog()
+    run_log.started('/paged-log')
+    counters = {
+        'current_path': '/paged-log',
+        'scanned_count': 0,
+        'scanned_size': 0,
+        'error_count': 45,
+        'errors': [],
+    }
+    for index in range(45):
+        run_log.scan_error(f'error {index}', counters)
+    run_log.completed(counters, 'snapshot.jsonl.gz')
+
+    records = []
+    cursor = 0
+    while True:
+        response = client.get(
+            f'/api/v1/scan/{run_log.scan_id}/log',
+            query_string={'cursor': cursor, 'limit': 20},
+        )
+        assert response.status_code == 200
+        page = response.get_json()
+        assert len(page['records']) <= 20
+        records.extend(page['records'])
+        assert page['next_cursor'] >= cursor
+        cursor = page['next_cursor']
+        if not page['has_more']:
+            break
+
+    assert records == read_scan_log(run_log.scan_id)
+
+
+@pytest.mark.parametrize('query', [
+    {'cursor': -1},
+    {'cursor': 'nope'},
+    {'limit': 0},
+    {'limit': 501},
+])
+def test_scan_log_endpoint_validates_pagination(client, query):
+    assert client.get(
+        f'/api/v1/scan/{uuid.uuid4()}/log', query_string=query).status_code == 400
+
+
+def test_scan_status_listing_is_limited(config):
+    for index in range(51):
+        run_log = ScanRunLog()
+        run_log.started(f'/scan-{index}')
+        run_log.close()
+    assert len(list_scan_statuses()) == 50
+
+
+def test_scan_log_failure_does_not_fail_scan(config, sample_tree):
+    class BrokenLogFile:
+        def write(self, _data):
+            raise OSError('disk full')
+
+        def close(self):
+            pass
+
+    run_log = ScanRunLog()
+    run_log._log_file.close()
+    run_log._log_file = BrokenLogFile()
+    run_log.started(str(sample_tree))
+
+    result = run_scan_to_snapshot(str(sample_tree), run_log=run_log)
+    assert result['counters']['scanned_count'] == 3
+    status = read_scan_status(run_log.scan_id)
+    assert status['status'] == 'completed'
+    assert status['log_available'] is False
+
+
+@pytest.mark.parametrize('scan_id', ['not-a-uuid', str(uuid.uuid4())])
+def test_unknown_scan_id_is_404_for_status_and_log(client, scan_id):
+    assert client.get(f'/api/v1/scan/{scan_id}').status_code == 404
+    assert client.get(f'/api/v1/scan/{scan_id}/log').status_code == 404
 
 
 def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_path):

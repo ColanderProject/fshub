@@ -1,5 +1,6 @@
 """Tests for snapshot loading: formats, deep trees and Windows paths."""
 
+import json
 import os
 
 from fshub.api.explorer import (
@@ -33,8 +34,11 @@ def test_windows_totals_roll_up_to_this_pc(config, app):
 
     assert users['S'] == 3 and users['C'] == 2
     assert drive['S'] == 103 and drive['C'] == 3
+    # Old snapshots have no cloud state, so every file counts as fully local.
+    assert drive['LS'] == drive['S'] and drive['LC'] == drive['C']
     # The "/" root must aggregate the drives too.
     assert root['S'] == 103 and root['C'] == 3
+    assert root['LS'] == root['S'] and root['LC'] == root['C']
 
 
 def test_windows_paths_are_web_normalized(client, config):
@@ -45,11 +49,48 @@ def test_windows_paths_are_web_normalized(client, config):
         'snapshot': 'snapshot_1_3.jsonl.gz', 'path': '/C:'}).get_json()
     assert listing['current_path'] == '/C:'
     assert [f['name'] for f in listing['files']] == ['boot.ini']
+    # Snapshots created before cloud-state support remain loadable.
+    assert listing['files'][0]['cloud_state'] is None
 
     # The filtered response uses the same path format as the plain one.
     filtered = client.get('/api/v1/getPath', query_string={
         'snapshot': 'snapshot_1_3.jsonl.gz', 'path': '/C:', 'use_filter': 'true'}).get_json()
     assert filtered['current_path'] == listing['current_path']
+
+
+def test_cloud_state_is_returned_with_file_entries(client, config):
+    records = _windows_snapshot()
+    records[1]['c'] = ['not_fully_local']
+    write_snapshot(config, 'snapshot_cloud.jsonl.gz', records)
+    client.post('/api/v1/load_snapshot', json={'filename': 'snapshot_cloud.jsonl.gz'})
+
+    listing = client.get('/api/v1/getPath', query_string={
+        'snapshot': 'snapshot_cloud.jsonl.gz', 'path': '/C:'}).get_json()
+    assert listing['files'][0]['cloud_state'] == 'not_fully_local'
+    assert listing['S'] == 103 and listing['C'] == 3
+    assert listing['local_size'] == 3
+    assert listing['local_file_count'] == 2
+    assert listing['dirs'][0]['local_size'] == 3
+    assert listing['dirs'][0]['local_file_count'] == 2
+
+
+def test_filtered_totals_include_fully_local_values(client, config):
+    records = _windows_snapshot()
+    records[1]['c'] = ['not_fully_local']
+    filename = 'snapshot_cloud_filter.jsonl.gz'
+    write_snapshot(config, filename, records)
+    client.post('/api/v1/load_snapshot', json={'filename': filename})
+    listing = client.get('/api/v1/getPath', query_string={
+        'snapshot': filename,
+        'path': '/',
+        'use_filter': 'true',
+        'recursive_calc': 'true',
+        'filter_in': json.dumps([]),
+    }).get_json()
+    assert listing['dirs'][0]['S'] == 103
+    assert listing['dirs'][0]['local_size'] == 3
+    assert listing['local_size'] == 3
+    assert listing['local_file_count'] == 2
 
 
 def test_to_web_path_is_noop_for_posix():

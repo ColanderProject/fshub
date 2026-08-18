@@ -10,7 +10,30 @@ import time
 import uuid
 
 from .config import get_config
+from .scan_logs import MAX_REPORTED_ERRORS, ScanRunLog
 from .utils import get_system_info
+
+
+# These values are returned in os.stat_result.st_file_attributes on Windows.
+# Keep them here because Python does not expose the newer constants on every
+# supported version.
+_FILE_ATTRIBUTE_OFFLINE = 0x00001000
+_FILE_ATTRIBUTE_PINNED = 0x00080000
+_FILE_ATTRIBUTE_UNPINNED = 0x00100000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000
+
+
+def get_cloud_state(stat_result):
+    """Return a coarse Windows cloud-file state without another system call."""
+    attributes = getattr(stat_result, 'st_file_attributes', 0)
+    if attributes & (_FILE_ATTRIBUTE_OFFLINE |
+                     _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS):
+        return 'not_fully_local'
+    if attributes & _FILE_ATTRIBUTE_PINNED:
+        return 'pinned'
+    if attributes & _FILE_ATTRIBUTE_UNPINNED:
+        return 'evictable'
+    return None
 
 
 def _normalize_prefix(path):
@@ -46,6 +69,7 @@ def _init_counters(counters, current_path):
     counters.setdefault('scanned_count', 0)
     counters.setdefault('scanned_size', 0)
     counters.setdefault('errors', [])
+    counters.setdefault('error_count', len(counters['errors']))
     counters['current_path'] = current_path
 
 
@@ -70,7 +94,8 @@ def _should_skip_path(path, normalized_skip_prefixes):
     return False
 
 
-def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
+def scan_windows_drives(counters, result_callback=None, skip_prefixes=None,
+                        error_callback=None):
     """Scan all Windows drives when path is '/' on Windows."""
     all_results = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
@@ -90,7 +115,8 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
         'd': [drive[:2] for drive in drives],
         't': [],
         'T': [],
-        's': []
+        's': [],
+        'c': []
     }
 
     # Get timestamps for each drive
@@ -102,8 +128,13 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
                 int(stat.st_mtime),
                 int(stat.st_atime)
             ])
-        except OSError:
+        except OSError as e:
             root_obj['T'].append([0, 0, 0])
+            _record_error(
+                counters,
+                f"Error accessing directory {drive}: {str(e)}",
+                error_callback,
+            )
 
     all_results.append(root_obj)
 
@@ -111,13 +142,29 @@ def scan_windows_drives(counters, result_callback=None, skip_prefixes=None):
         counters['current_path'] = drive
         if result_callback:
             result_callback(counters)
-        drive_results = scan(drive, counters, result_callback, skip_prefixes=skip_prefixes)
+        drive_results = scan(
+            drive,
+            counters,
+            result_callback,
+            skip_prefixes=skip_prefixes,
+            error_callback=error_callback,
+        )
         all_results.extend(drive_results)
 
     return all_results
 
 
-def scan(path, counters, result_callback=None, skip_prefixes=None):
+def _record_error(counters, message, error_callback=None):
+    """Count every error but keep only a bounded sample in task status."""
+    counters['error_count'] += 1
+    if len(counters['errors']) < MAX_REPORTED_ERRORS:
+        counters['errors'].append(message)
+    if error_callback:
+        error_callback(message, counters)
+
+
+def scan(path, counters, result_callback=None, skip_prefixes=None,
+         error_callback=None):
     """Scan a directory and return structured data about files and folders."""
     result = []
     normalized_skip_prefixes = _normalize_skip_prefixes(skip_prefixes or [])
@@ -126,7 +173,15 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
     # reports a single combined total.
     _init_counters(counters, path)
 
-    for root, dirs, files in os.walk(path):
+    def walk_error(error):
+        error_path = getattr(error, 'filename', None) or path
+        _record_error(
+            counters,
+            f"Error accessing directory {error_path}: {str(error)}",
+            error_callback,
+        )
+
+    for root, dirs, files in os.walk(path, onerror=walk_error):
         try:
             if _should_skip_path(root, normalized_skip_prefixes):
                 dirs[:] = []
@@ -148,7 +203,8 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
                 'd': [],
                 't': [],
                 'T': [],
-                's': []
+                's': [],
+                'c': []
             }
 
             for file in files:
@@ -159,6 +215,7 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
                     stat = os.stat(file_path)
                     path_obj['f'].append(file)
                     path_obj['s'].append(stat.st_size)
+                    path_obj['c'].append(get_cloud_state(stat))
                     path_obj['t'].append([
                         int(stat.st_ctime),
                         int(stat.st_mtime),
@@ -172,7 +229,11 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
                         result_callback(counters)
 
                 except OSError as e:
-                    counters['errors'].append(f"Error accessing file {file_path}: {str(e)}")
+                    _record_error(
+                        counters,
+                        f"Error accessing file {file_path}: {str(e)}",
+                        error_callback,
+                    )
 
             for directory in dirs:
                 dir_path = os.path.join(root, directory)
@@ -185,11 +246,19 @@ def scan(path, counters, result_callback=None, skip_prefixes=None):
                         int(stat.st_atime)
                     ])
                 except OSError as e:
-                    counters['errors'].append(f"Error accessing directory {dir_path}: {str(e)}")
+                    _record_error(
+                        counters,
+                        f"Error accessing directory {dir_path}: {str(e)}",
+                        error_callback,
+                    )
 
             result.append(path_obj)
         except OSError as e:
-            counters['errors'].append(f"Error accessing directory {root}: {str(e)}")
+            _record_error(
+                counters,
+                f"Error accessing directory {root}: {str(e)}",
+                error_callback,
+            )
 
     return result
 
@@ -248,47 +317,67 @@ def save_scan_result(scan_result, use_index=False):
     }
 
 
-def run_scan_to_snapshot(scan_path, use_index=False, counters=None, result_callback=None, skip_prefixes=None):
-    """Run a scan and save its output to a snapshot file."""
+def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
+                         result_callback=None, skip_prefixes=None, scan_id=None,
+                         run_log=None):
+    """Run a scan, save its snapshot, and durably log its status/errors."""
     counters = counters if counters is not None else {}
     start_time = datetime.now()
     counters['skip_prefixes'] = list(skip_prefixes or [])
     _init_counters(counters, scan_path)
 
-    if platform.system() == 'Windows' and scan_path == '/':
-        scan_result = scan_windows_drives(
-            counters,
-            result_callback,
-            skip_prefixes=skip_prefixes,
-        )
-    else:
-        scan_result = scan(
-            scan_path,
-            counters,
-            result_callback,
-            skip_prefixes=skip_prefixes,
-        )
+    if run_log is None:
+        run_log = ScanRunLog(scan_id)
+        run_log.started(scan_path, use_index=use_index, skip_paths=skip_prefixes)
 
-    finish_time = datetime.now()
+    def report_progress(current_counters):
+        run_log.progress(current_counters)
+        if result_callback:
+            result_callback(current_counters)
 
-    if scan_result:
-        system_info = get_system_info()
-        scan_result[0]['device_name'] = system_info['device_name']
-        scan_result[0]['device_id'] = system_info['thumbprint']
-        scan_result[0]['cpu_model'] = system_info['cpu_model']
-        scan_result[0]['cpu_name'] = system_info['cpu_model']
-        scan_result[0]['memory_size'] = system_info['memory_size']
-        scan_result[0]['host_name'] = system_info['host_name']
-        scan_result[0]['ip_addr'] = system_info['ip_addr']
-        scan_result[0]['mac_addr'] = system_info['mac_addr']
-        scan_result[0]['os_name'] = system_info['os_name']
-        scan_result[0]['start_scan_time'] = int(start_time.timestamp())
-        scan_result[0]['finish_scan_time'] = int(finish_time.timestamp())
+    try:
+        if platform.system() == 'Windows' and scan_path == '/':
+            scan_result = scan_windows_drives(
+                counters,
+                report_progress,
+                skip_prefixes=skip_prefixes,
+                error_callback=run_log.scan_error,
+            )
+        else:
+            scan_result = scan(
+                scan_path,
+                counters,
+                report_progress,
+                skip_prefixes=skip_prefixes,
+                error_callback=run_log.scan_error,
+            )
 
-    saved_result = save_scan_result(scan_result, use_index=use_index)
-    counters['current_path'] = scan_path
+        finish_time = datetime.now()
+
+        if scan_result:
+            system_info = get_system_info()
+            scan_result[0]['device_name'] = system_info['device_name']
+            scan_result[0]['device_id'] = system_info['thumbprint']
+            scan_result[0]['cpu_model'] = system_info['cpu_model']
+            scan_result[0]['cpu_name'] = system_info['cpu_model']
+            scan_result[0]['memory_size'] = system_info['memory_size']
+            scan_result[0]['host_name'] = system_info['host_name']
+            scan_result[0]['ip_addr'] = system_info['ip_addr']
+            scan_result[0]['mac_addr'] = system_info['mac_addr']
+            scan_result[0]['os_name'] = system_info['os_name']
+            scan_result[0]['start_scan_time'] = int(start_time.timestamp())
+            scan_result[0]['finish_scan_time'] = int(finish_time.timestamp())
+
+        saved_result = save_scan_result(scan_result, use_index=use_index)
+        counters['current_path'] = scan_path
+        run_log.completed(counters, saved_result['result_file'])
+    except Exception as error:
+        run_log.failed(error, counters)
+        raise
 
     return {
+        'scan_id': run_log.scan_id,
+        'scan_log': run_log.path,
         'result_file': saved_result['result_file'],
         'result_path': saved_result['result_path'],
         'entry_count': len(scan_result),

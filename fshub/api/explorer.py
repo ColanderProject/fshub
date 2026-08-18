@@ -298,16 +298,27 @@ def _load_groups(snapshot_filename):
     return groups_dict
 
 
+def _is_fully_local(path_obj, index):
+    """True unless Windows reported that this file is not fully local."""
+    states = path_obj.get('c', [])
+    return index >= len(states) or states[index] != 'not_fully_local'
+
+
 def _compute_recursive_totals(snapshot_data, path_index, snapshot_os):
-    """Fill in S (total size) and C (total file count) for every directory.
+    """Fill in logical and fully-local totals for every directory.
 
     Done bottom-up over an explicit child->parent map so it stays iterative:
     a recursive walk blows the Python stack on deep trees, and a purely
     string-based parent lookup cannot express the Windows "This PC" root.
     """
     for path_obj in snapshot_data:
-        path_obj['S'] = sum(path_obj.get('s', []))
+        sizes = path_obj.get('s', [])
+        path_obj['S'] = sum(sizes)
         path_obj['C'] = len(path_obj.get('f', []))
+        local_indices = [i for i in range(len(path_obj.get('f', [])))
+                         if _is_fully_local(path_obj, i)]
+        path_obj['LS'] = sum(sizes[i] for i in local_indices if i < len(sizes))
+        path_obj['LC'] = len(local_indices)
 
     # child index -> parent index, derived from the recorded directory lists
     parent_of = {}
@@ -343,6 +354,8 @@ def _compute_recursive_totals(snapshot_data, path_index, snapshot_os):
             continue
         snapshot_data[parent_idx]['S'] += snapshot_data[idx]['S']
         snapshot_data[parent_idx]['C'] += snapshot_data[idx]['C']
+        snapshot_data[parent_idx]['LS'] += snapshot_data[idx]['LS']
+        snapshot_data[parent_idx]['LC'] += snapshot_data[idx]['LC']
 
 
 def _validate_snapshot_record(record):
@@ -355,7 +368,7 @@ def _validate_snapshot_record(record):
         if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ValueError(f'snapshot field {field!r} must be a list of strings')
 
-    for field in ('s', 't', 'T'):
+    for field in ('s', 't', 'T', 'c'):
         if not isinstance(record.get(field, []), list):
             raise ValueError(f'snapshot field {field!r} must be a list')
 
@@ -463,10 +476,12 @@ def get_snapshot_info(snapshot_filename):
 def _file_entry(path_obj, i):
     size = path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0
     timestamps = path_obj['t'][i] if i < len(path_obj.get('t', [])) else [None, None, None]
+    cloud_state = path_obj['c'][i] if i < len(path_obj.get('c', [])) else None
     return {
         'name': path_obj['f'][i],
         'size': size,
         'size_formatted': format_bytes(size),
+        'cloud_state': cloud_state,
         'created': timestamps[0],
         'modified': timestamps[1],
         'accessed': timestamps[2],
@@ -483,9 +498,13 @@ def _dir_entry(path_obj, i):
     }
 
 
-def _apply_totals(dir_info, size, count):
+def _apply_totals(dir_info, size, count, local_size=None, local_count=None):
+    local_size = size if local_size is None else local_size
+    local_count = count if local_count is None else local_count
     dir_info['S'] = size
     dir_info['C'] = count
+    dir_info['local_size'] = local_size
+    dir_info['local_file_count'] = local_count
     dir_info['size_formatted'] = format_bytes(size)
     dir_info['file_count'] = count
 
@@ -506,7 +525,13 @@ def format_path_content(path_obj, snapshot_filename, entry=None):
         subdir_idx = index.get(subdir_path)
         if subdir_idx is not None:
             subdir_obj = data[subdir_idx]
-            _apply_totals(dir_info, subdir_obj.get('S', 0), subdir_obj.get('C', 0))
+            _apply_totals(
+                dir_info,
+                subdir_obj.get('S', 0),
+                subdir_obj.get('C', 0),
+                subdir_obj.get('LS', subdir_obj.get('S', 0)),
+                subdir_obj.get('LC', subdir_obj.get('C', 0)),
+            )
         dirs.append(dir_info)
 
     return {
@@ -515,6 +540,8 @@ def format_path_content(path_obj, snapshot_filename, entry=None):
         'dirs': dirs,
         'S': path_obj.get('S', 0),
         'C': path_obj.get('C', 0),
+        'local_size': path_obj.get('LS', path_obj.get('S', 0)),
+        'local_file_count': path_obj.get('LC', path_obj.get('C', 0)),
         'total_size_formatted': format_bytes(path_obj.get('S', 0))
     }
 
@@ -562,19 +589,37 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
         if subdir_idx is not None:
             subdir_obj = data[subdir_idx]
             if recursive_calc:
-                size, count = calculate_filtered_recursive_totals(
-                    subdir_obj, snapshot_filename, filter_in, filter_out, entry=entry,
+                totals = calculate_filtered_recursive_totals(
+                    subdir_obj, snapshot_filename, filter_in, filter_out,
+                    entry=entry,
                 )
-                _apply_totals(dir_info, size, count)
+                _apply_totals(dir_info, *totals)
             else:
-                _apply_totals(dir_info, subdir_obj.get('S', 0), subdir_obj.get('C', 0))
+                _apply_totals(
+                    dir_info,
+                    subdir_obj.get('S', 0),
+                    subdir_obj.get('C', 0),
+                    subdir_obj.get('LS', subdir_obj.get('S', 0)),
+                    subdir_obj.get('LC', subdir_obj.get('C', 0)),
+                )
 
         filtered_dirs.append(dir_info)
 
+    size = sum(file['size'] for file in filtered_files)
+    local_files = [file for file in filtered_files
+                   if file['cloud_state'] != 'not_fully_local']
+    local_size = sum(file['size'] for file in local_files)
     return {
         'current_path': to_web_path(path_obj['p'], snapshot_os),
         'files': filtered_files,
         'dirs': filtered_dirs,
+        'S': size + sum(directory.get('S', 0) for directory in filtered_dirs),
+        'C': len(filtered_files) + sum(directory.get('C', 0)
+                                       for directory in filtered_dirs),
+        'local_size': local_size + sum(directory.get('local_size', 0)
+                                       for directory in filtered_dirs),
+        'local_file_count': len(local_files) + sum(
+            directory.get('local_file_count', 0) for directory in filtered_dirs),
         'filtered': True
     }
 
@@ -583,14 +628,16 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
                        files=None, dirinFilterSet=None, allIncluded=False):
     """Total a directory tree, honouring the group filters.
 
-    Returns (total_size, total_count) and, when ``files`` is provided,
-    appends every matching file to it.
+    Returns total and fully-local size/count values and, when ``files`` is
+    provided, appends every matching file to it.
 
     Uses an explicit stack rather than recursion: snapshots routinely nest
     deeper than Python's recursion limit.
     """
     total_size = 0
     total_count = 0
+    local_size = 0
+    local_count = 0
 
     snapshot_os = data[0].get('os_name') if data else None
 
@@ -622,6 +669,9 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
             size = current['s'][i] if i < len(current.get('s', [])) else 0
             total_size += size
             total_count += 1
+            if _is_fully_local(current, i):
+                local_size += size
+                local_count += 1
             if files is not None:
                 files.append({
                     'name': filename,
@@ -656,7 +706,7 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
             stack.append((data[subdir_idx], subdir_include))
 
-    return total_size, total_count
+    return total_size, total_count, local_size, local_count
 
 
 def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out,
