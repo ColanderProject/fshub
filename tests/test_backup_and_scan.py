@@ -59,10 +59,14 @@ def test_is_related_path(a, b, expected):
 
 def test_scan_counters_accumulate(config, sample_tree):
     counters = {}
-    run_scan_to_snapshot(str(sample_tree), counters=counters)
+    result = run_scan_to_snapshot(str(sample_tree), counters=counters)
+    status = read_scan_status(result['scan_id'])
+
     assert counters['scanned_count'] == 3
     assert counters['scanned_size'] == 60
     assert counters['errors'] == []
+    assert result['finish_time'] == status['finish_time']
+    assert result['duration'] == result['finish_time'] - result['start_time']
 
 
 def test_scan_snapshot_keeps_cloud_state_aligned_with_files(config, sample_tree):

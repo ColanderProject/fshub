@@ -10,7 +10,7 @@ import time
 import uuid
 
 from .config import get_config
-from .scan_logs import MAX_REPORTED_ERRORS, ScanRunLog
+from .scan_logs import MAX_REPORTED_ERRORS, ScanRunLog, scan_duration
 from .utils import get_system_info
 
 
@@ -352,7 +352,7 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
                 error_callback=run_log.scan_error,
             )
 
-        finish_time = datetime.now()
+        traversal_finish_time = datetime.now()
 
         if scan_result:
             system_info = get_system_info()
@@ -366,11 +366,11 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
             scan_result[0]['mac_addr'] = system_info['mac_addr']
             scan_result[0]['os_name'] = system_info['os_name']
             scan_result[0]['start_scan_time'] = int(start_time.timestamp())
-            scan_result[0]['finish_scan_time'] = int(finish_time.timestamp())
+            scan_result[0]['finish_scan_time'] = int(traversal_finish_time.timestamp())
 
         saved_result = save_scan_result(scan_result, use_index=use_index)
         counters['current_path'] = scan_path
-        run_log.completed(counters, saved_result['result_file'])
+        finish_time = run_log.completed(counters, saved_result['result_file'])
     except Exception as error:
         run_log.failed(error, counters)
         raise
@@ -382,8 +382,8 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
         'result_path': saved_result['result_path'],
         'entry_count': len(scan_result),
         'counters': counters,
-        'start_time': int(start_time.timestamp()),
-        'finish_time': int(finish_time.timestamp()),
-        'duration': max(0, int((finish_time - start_time).total_seconds())),
+        'start_time': run_log.start_time,
+        'finish_time': finish_time,
+        'duration': scan_duration(run_log.start_time, finish_time),
         **{k: v for k, v in saved_result.items() if k not in {'result_file', 'result_path'}},
     }

@@ -195,6 +195,7 @@ class ScanRunLog:
             result_file=result_file,
         )
         self.close()
+        return finish_time
 
     def failed(self, error, counters):
         finish_time = _timestamp()

@@ -592,7 +592,8 @@
         let scanPollInterval = null; // Poll while the Scanner tab is visible
         let currentScanLogId = null;
         let scanLogCursor = 0;
-        let scanLogLoading = false;
+        let scanLogHasMore = false;
+        let scanLogGeneration = 0;
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -610,6 +611,11 @@
             });
             document.getElementById('scan-log-more').addEventListener('click', () => loadScanLogPage());
             document.getElementById('scan-log-all').addEventListener('click', loadAllScanLog);
+            document.getElementById('scan-log-modal').addEventListener('hidden.bs.modal', () => {
+                scanLogGeneration++;
+                currentScanLogId = null;
+                setScanLogPager(false);
+            });
             document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
                 loadScanTasks();
                 loadScanResults();
@@ -1323,24 +1329,30 @@
         }
 
         function setScanLogPager(hasMore) {
+            scanLogHasMore = hasMore;
             document.getElementById('scan-log-more').hidden = !hasMore;
             document.getElementById('scan-log-all').hidden = !hasMore;
         }
 
-        async function loadScanLogPage(limit = 200) {
-            if (!currentScanLogId || scanLogLoading) return false;
-            scanLogLoading = true;
+        async function loadScanLogPage(limit = 200, generation = scanLogGeneration) {
+            const scanId = currentScanLogId;
+            const cursor = scanLogCursor;
+            if (!scanId) return false;
+
             const moreButton = document.getElementById('scan-log-more');
             const allButton = document.getElementById('scan-log-all');
             moreButton.disabled = true;
             allButton.disabled = true;
             try {
-                const params = new URLSearchParams({cursor: scanLogCursor, limit});
+                const params = new URLSearchParams({cursor, limit});
                 const response = await fetch(
-                    `/api/v1/scan/${encodeURIComponent(currentScanLogId)}/log?${params}`,
+                    `/api/v1/scan/${encodeURIComponent(scanId)}/log?${params}`,
                     {method: 'GET', credentials: 'same-origin'}
                 );
                 const data = await response.json();
+                if (generation !== scanLogGeneration || scanId !== currentScanLogId) {
+                    return false;
+                }
                 if (!response.ok) {
                     alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
                     return false;
@@ -1360,33 +1372,35 @@
                 setScanLogPager(Boolean(data.has_more));
                 return true;
             } finally {
-                scanLogLoading = false;
-                moreButton.disabled = false;
-                allButton.disabled = false;
+                if (generation === scanLogGeneration) {
+                    moreButton.disabled = false;
+                    allButton.disabled = false;
+                }
             }
         }
 
         async function loadAllScanLog() {
+            const generation = scanLogGeneration;
             const allButton = document.getElementById('scan-log-all');
-            const originalLabel = allButton.textContent;
             allButton.textContent = 'Loading...';
             try {
-                let pages = 0;
-                while (currentScanLogId && !document.getElementById('scan-log-more').hidden) {
-                    if (!await loadScanLogPage(500) || ++pages > 200) break;
+                while (generation === scanLogGeneration && scanLogHasMore) {
+                    if (!await loadScanLogPage(500, generation)) break;
                 }
             } finally {
-                allButton.textContent = originalLabel;
+                if (generation === scanLogGeneration) allButton.textContent = 'Load all';
             }
         }
 
         async function showScanLog(scanId) {
+            const generation = ++scanLogGeneration;
             currentScanLogId = scanId;
             scanLogCursor = 0;
             document.getElementById('scan-log-id').textContent = scanId;
             document.getElementById('scan-log-tbody').innerHTML = '';
+            document.getElementById('scan-log-all').textContent = 'Load all';
             setScanLogPager(false);
-            if (await loadScanLogPage()) {
+            if (await loadScanLogPage(200, generation) && generation === scanLogGeneration) {
                 bootstrap.Modal.getOrCreateInstance(
                     document.getElementById('scan-log-modal')).show();
             }

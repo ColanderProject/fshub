@@ -112,8 +112,7 @@ def start_scan():
                         else 'completed')
                     running_scans[scan_id]['result_file'] = result['result_file']
                     running_scans[scan_id]['counters'] = counters
-                    running_scans[scan_id]['finish_time'] = int(
-                        datetime.now().timestamp())
+                    running_scans[scan_id]['finish_time'] = result['finish_time']
 
         thread = threading.Thread(target=run_scan, daemon=True)
         running_scans[scan_id] = {
