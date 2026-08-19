@@ -16,6 +16,7 @@ from ..scan_logs import (
     list_scan_statuses,
     read_scan_log_page,
     read_scan_status,
+    scan_duration,
 )
 from ..scanning import is_related_path, run_scan_to_snapshot
 from . import json_body
@@ -139,12 +140,16 @@ def _task_payload(scan_id, scan_info):
         'error_count': source.get('error_count', len(errors)),
         'errors': errors,
     }
+    start_time = scan_info['start_time']
+    finish_time = scan_info.get('finish_time')
+    status = scan_info['status']
     return {
         'scan_id': scan_id,
         'path': scan_info['path'],
-        'status': scan_info['status'],
-        'start_time': scan_info['start_time'],
-        'finish_time': scan_info.get('finish_time'),
+        'status': status,
+        'start_time': start_time,
+        'finish_time': finish_time,
+        'duration': scan_duration(start_time, finish_time, status),
         'counters': counters,
         'error': scan_info.get('error'),
         'result_file': scan_info.get('result_file'),

@@ -382,5 +382,8 @@ def run_scan_to_snapshot(scan_path, use_index=False, counters=None,
         'result_path': saved_result['result_path'],
         'entry_count': len(scan_result),
         'counters': counters,
+        'start_time': int(start_time.timestamp()),
+        'finish_time': int(finish_time.timestamp()),
+        'duration': max(0, int((finish_time - start_time).total_seconds())),
         **{k: v for k, v in saved_result.items() if k not in {'result_file', 'result_path'}},
     }

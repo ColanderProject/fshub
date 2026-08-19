@@ -20,6 +20,17 @@ def _timestamp():
     return int(datetime.now().timestamp())
 
 
+def scan_duration(start_time, finish_time, status=None):
+    """Return elapsed seconds, or None when it cannot be determined."""
+    if not isinstance(start_time, (int, float)):
+        return None
+    if isinstance(finish_time, (int, float)):
+        return max(0, int(finish_time) - int(start_time))
+    if status == 'running':
+        return max(0, _timestamp() - int(start_time))
+    return None
+
+
 def _counter_snapshot(counters):
     errors = list(counters.get('errors', []))[:MAX_REPORTED_ERRORS]
     return {
@@ -278,6 +289,11 @@ def read_scan_status(scan_id):
     if status.get('status') == 'running':
         status['status'] = 'interrupted'
     status['log_available'] = _log_available(_log_path)
+    status['duration'] = scan_duration(
+        status.get('start_time'),
+        status.get('finish_time'),
+        status.get('status'),
+    )
     return status
 
 

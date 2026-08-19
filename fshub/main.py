@@ -132,6 +132,10 @@ def scan(path, use_index, skip_paths):
         "errors="
         f"{result['counters'].get('error_count', len(result['counters'].get('errors', [])))}"
     )
+    click.echo(
+        f"Finished at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(result['finish_time']))} "
+        f"({result['duration']}s)"
+    )
     if skip_paths:
         click.echo(f"Skipped prefixes: {', '.join(skip_paths)}")
 

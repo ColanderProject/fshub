@@ -243,6 +243,8 @@
                                     <th>Errors</th>
                                     <th>Current path</th>
                                     <th>Started</th>
+                                    <th>Ended</th>
+                                    <th>Duration</th>
                                     <th>Log</th>
                                 </tr>
                             </thead>
@@ -343,8 +345,9 @@
                             </div>
 
                             <div class="mb-3">
-                                <label for="device-storage" class="form-label">Storage Space (bytes)</label>
+                                <label for="device-storage" class="form-label">Storage Space</label>
                                 <input type="text" class="form-control" id="device-storage" required readonly>
+                                <div class="form-text" id="device-storage-human"></div>
                             </div>
 
                             <button type="submit" class="btn btn-primary">Add Device</button>
@@ -540,7 +543,10 @@
                             <tbody id="scan-log-tbody"></tbody>
                         </table>
                     </div>
-                    <button class="btn btn-sm btn-outline-primary" id="scan-log-more" hidden>Load more</button>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-primary" id="scan-log-more" hidden>Load more</button>
+                        <button class="btn btn-sm btn-outline-secondary" id="scan-log-all" hidden>Load all</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -586,6 +592,7 @@
         let scanPollInterval = null; // Poll while the Scanner tab is visible
         let currentScanLogId = null;
         let scanLogCursor = 0;
+        let scanLogLoading = false;
         
         // Initialize the app
         document.addEventListener('DOMContentLoaded', function() {
@@ -601,7 +608,8 @@
                 updateLocalStatsDisplay();
                 sortDirectories(dirsSortColumn, true);
             });
-            document.getElementById('scan-log-more').addEventListener('click', loadScanLogPage);
+            document.getElementById('scan-log-more').addEventListener('click', () => loadScanLogPage());
+            document.getElementById('scan-log-all').addEventListener('click', loadAllScanLog);
             document.getElementById('refresh-scan-tasks').addEventListener('click', () => {
                 loadScanTasks();
                 loadScanResults();
@@ -696,7 +704,7 @@
             data.snapshots.forEach(snapshot => {
                 const option = document.createElement('option');
                 option.value = snapshot.filename;
-                option.textContent = `${snapshot.filename} (${snapshot.size} bytes)`;
+                option.textContent = `${snapshot.filename} (${formatBytes(snapshot.size)})`;
                 if (snapshot.loaded) {
                     option.textContent += ' [LOADED]';
                     option.dataset.loaded = 'true';
@@ -1059,6 +1067,7 @@
             hostNameInput.value = deviceInfo.host_name;
             deviceIpInput.value = deviceInfo.ip_addr;
             deviceStorageInput.value = deviceInfo.storage_space;
+            document.getElementById('device-storage-human').textContent = formatBytes(deviceInfo.storage_space);
 
             // Show the form
             addDeviceSection.style.display = 'block';
@@ -1278,6 +1287,14 @@
                 startedCell.textContent = scan.start_time ? formatTimestamp(scan.start_time) : '';
                 row.appendChild(startedCell);
 
+                const endedCell = document.createElement('td');
+                endedCell.textContent = scan.finish_time ? formatTimestamp(scan.finish_time) : '';
+                row.appendChild(endedCell);
+
+                const durationCell = document.createElement('td');
+                durationCell.textContent = formatDuration(scanDurationSeconds(scan));
+                row.appendChild(durationCell);
+
                 const logCell = document.createElement('td');
                 const logButton = document.createElement('button');
                 logButton.className = 'btn btn-sm btn-outline-primary';
@@ -1305,34 +1322,62 @@
             return `Current: ${counters.current_path || ''}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
         }
 
-        async function loadScanLogPage() {
-            const moreButton = document.getElementById('scan-log-more');
-            moreButton.disabled = true;
-            const params = new URLSearchParams({cursor: scanLogCursor, limit: 200});
-            const response = await fetch(
-                `/api/v1/scan/${encodeURIComponent(currentScanLogId)}/log?${params}`,
-                {method: 'GET', credentials: 'same-origin'}
-            );
-            const data = await response.json();
-            moreButton.disabled = false;
-            if (!response.ok) {
-                alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
-                return false;
-            }
+        function setScanLogPager(hasMore) {
+            document.getElementById('scan-log-more').hidden = !hasMore;
+            document.getElementById('scan-log-all').hidden = !hasMore;
+        }
 
-            const tbody = document.getElementById('scan-log-tbody');
-            data.records.forEach(record => {
-                const row = document.createElement('tr');
-                [formatTimestamp(record.timestamp), record.event, scanLogDetails(record)].forEach(value => {
-                    const cell = document.createElement('td');
-                    cell.textContent = value;
-                    row.appendChild(cell);
+        async function loadScanLogPage(limit = 200) {
+            if (!currentScanLogId || scanLogLoading) return false;
+            scanLogLoading = true;
+            const moreButton = document.getElementById('scan-log-more');
+            const allButton = document.getElementById('scan-log-all');
+            moreButton.disabled = true;
+            allButton.disabled = true;
+            try {
+                const params = new URLSearchParams({cursor: scanLogCursor, limit});
+                const response = await fetch(
+                    `/api/v1/scan/${encodeURIComponent(currentScanLogId)}/log?${params}`,
+                    {method: 'GET', credentials: 'same-origin'}
+                );
+                const data = await response.json();
+                if (!response.ok) {
+                    alert('Failed to load scan log: ' + (data.error || 'Unknown error'));
+                    return false;
+                }
+
+                const tbody = document.getElementById('scan-log-tbody');
+                data.records.forEach(record => {
+                    const row = document.createElement('tr');
+                    [formatTimestamp(record.timestamp), record.event, scanLogDetails(record)].forEach(value => {
+                        const cell = document.createElement('td');
+                        cell.textContent = value;
+                        row.appendChild(cell);
+                    });
+                    tbody.appendChild(row);
                 });
-                tbody.appendChild(row);
-            });
-            scanLogCursor = data.next_cursor;
-            moreButton.hidden = !data.has_more;
-            return true;
+                scanLogCursor = data.next_cursor;
+                setScanLogPager(Boolean(data.has_more));
+                return true;
+            } finally {
+                scanLogLoading = false;
+                moreButton.disabled = false;
+                allButton.disabled = false;
+            }
+        }
+
+        async function loadAllScanLog() {
+            const allButton = document.getElementById('scan-log-all');
+            const originalLabel = allButton.textContent;
+            allButton.textContent = 'Loading...';
+            try {
+                let pages = 0;
+                while (currentScanLogId && !document.getElementById('scan-log-more').hidden) {
+                    if (!await loadScanLogPage(500) || ++pages > 200) break;
+                }
+            } finally {
+                allButton.textContent = originalLabel;
+            }
         }
 
         async function showScanLog(scanId) {
@@ -1340,6 +1385,7 @@
             scanLogCursor = 0;
             document.getElementById('scan-log-id').textContent = scanId;
             document.getElementById('scan-log-tbody').innerHTML = '';
+            setScanLogPager(false);
             if (await loadScanLogPage()) {
                 bootstrap.Modal.getOrCreateInstance(
                     document.getElementById('scan-log-modal')).show();
@@ -1372,7 +1418,7 @@
                 row.appendChild(nameCell);
                 
                 const sizeCell = document.createElement('td');
-                sizeCell.textContent = file.size;
+                sizeCell.textContent = formatBytes(file.size);
                 row.appendChild(sizeCell);
                 
                 const modCell = document.createElement('td');
@@ -2589,13 +2635,33 @@
         
         // Helper to format bytes
         function formatBytes(bytes) {
-            if (bytes === 0) return '0 Bytes';
+            const value = Number(bytes);
+            if (!Number.isFinite(value) || value < 0) return 'N/A';
+            if (value === 0) return '0 B';
 
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+            const i = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+            return parseFloat((value / Math.pow(1024, i)).toFixed(2)) + ' ' + units[i];
+        }
 
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        function scanDurationSeconds(scan) {
+            if (typeof scan.duration === 'number') return scan.duration;
+            if (!scan.start_time) return null;
+            const end = scan.finish_time || (
+                scan.status === 'running' ? Math.floor(Date.now() / 1000) : null);
+            if (end == null) return null;
+            return Math.max(0, end - scan.start_time);
+        }
+
+        function formatDuration(seconds) {
+            if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '';
+            seconds = Math.floor(seconds);
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const rest = seconds % 60;
+            if (hours > 0) return `${hours}h ${minutes}m ${rest}s`;
+            if (minutes > 0) return `${minutes}m ${rest}s`;
+            return `${rest}s`;
         }
 
         // Sorting, filtering, and paging variables

@@ -21,6 +21,7 @@ from fshub.scan_logs import (
     list_scan_statuses,
     read_scan_log,
     read_scan_status,
+    scan_duration,
 )
 from fshub.scanning import is_related_path, run_scan_to_snapshot
 
@@ -136,6 +137,8 @@ def test_cli_reports_full_scan_log_path(config, sample_tree):
     result = CliRunner().invoke(cli, ['scan', str(sample_tree)])
     assert result.exit_code == 0
     assert f"Scan log saved as {config.scan_log_dir}" in result.output
+    assert 'Finished at' in result.output
+    assert result.output.rstrip().endswith('s)')
 
 
 def test_scan_endpoint_reports_status(client, sample_tree):
@@ -152,6 +155,9 @@ def test_scan_endpoint_reports_status(client, sample_tree):
     assert status['status'] == 'completed'
     assert status['counters']['scanned_count'] == 3
     assert status['error'] is None
+    assert status['finish_time'] is not None
+    assert status['finish_time'] >= status['start_time']
+    assert status['duration'] == status['finish_time'] - status['start_time']
 
 
 def test_unknown_scan_id_is_404(client):
@@ -255,8 +261,11 @@ def test_unfinished_and_failed_scan_statuses_are_restored(client):
     failed_status = client.get(f'/api/v1/scan/{failed.scan_id}').get_json()
     assert interrupted_status['status'] == 'interrupted'
     assert interrupted_status['finish_time'] is None
+    assert interrupted_status['duration'] is None
     assert failed_status['status'] == 'error'
     assert failed_status['finish_time'] is not None
+    assert failed_status['duration'] == scan_duration(
+        failed_status['start_time'], failed_status['finish_time'], 'error')
     assert failed_status['result_file'] is None
     assert failed_status['error'] == 'boom'
 
@@ -302,6 +311,15 @@ def test_scan_errors_are_bounded_in_status_but_complete_in_log(config, client):
     listed = next(item for item in listing
                   if item['scan_id'] == run_log.scan_id)
     assert listed['counters'] == status['counters']
+
+
+def test_scan_duration_from_start_and_finish():
+    assert scan_duration(100, 130) == 30
+    assert scan_duration(100, 90) == 0
+    assert scan_duration(None, 130) is None
+    assert scan_duration(100, None, 'interrupted') is None
+    elapsed = scan_duration(int(time.time()) - 5, None, 'running')
+    assert 4 <= elapsed <= 10
 
 
 def test_scan_log_endpoint_is_cursor_paginated(config, client):
