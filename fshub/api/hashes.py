@@ -101,8 +101,8 @@ def _hash_files(file_paths, algorithm):
 
 def _validate_request(data):
     """Validate common request fields, returning an error tuple or None."""
-    snapshot_filename = data.get('snapshot_filename', '')
-    if not isinstance(snapshot_filename, str) or not snapshot_filename:
+    snapshot_id = data.get('snapshot_id', '')
+    if not isinstance(snapshot_id, str) or not snapshot_id:
         return 'Snapshot filename is required', 400
 
     algorithm = data.get('algorithm', 'sha256')
@@ -116,8 +116,8 @@ def _validate_request(data):
         return filter_error, 400
 
     with snapshots_lock:
-        if snapshot_filename not in loaded_snapshots:
-            return f'Snapshot not loaded: {snapshot_filename}', 400
+        if snapshot_id not in loaded_snapshots:
+            return f'Snapshot not loaded: {snapshot_id}', 400
 
     return None
 
@@ -125,7 +125,7 @@ def _validate_request(data):
 def _collect_files(data):
     """Resolve a validated request into local paths to hash."""
     files = get_filtered_files(
-        data['snapshot_filename'],
+        data['snapshot_id'],
         data.get('filter_in', []),
         data.get('filter_out', []),
     )

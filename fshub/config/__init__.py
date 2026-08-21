@@ -6,11 +6,26 @@ authentication before the request reaches this application.
 """
 
 import os
+import platform
 import threading
 import yaml
 from pathlib import Path
 
 CONFIG_FILENAME = 'fshub.yaml'
+
+
+def default_local_state_path():
+    """Where this installation keeps identity that must not travel.
+
+    Deliberately outside data_path: data_path is the directory users copy,
+    sync or restore, and a producer id that travels with it would let two
+    machines append to one increment chain (design doc 8.3).
+    """
+    if platform.system() == 'Windows':
+        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
+        return os.path.join(base, 'fshub')
+    return os.path.expanduser('~/.local/state/fshub/')
+
 
 DEFAULTS = {
     'data_path': '~/.fshub/',
@@ -43,6 +58,7 @@ def _clean_port(value):
 class Config:
     def __init__(self, config_path=None):
         self.data_path = os.path.expanduser(DEFAULTS['data_path'])
+        self.local_state_path = default_local_state_path()
         self.listen_ip = DEFAULTS['listen_ip']
         self.listen_port = DEFAULTS['listen_port']
         self.config_path = None
@@ -80,6 +96,7 @@ class Config:
         # Every unusable value is reported and then ignored: a typo in the
         # config file must not take the whole process down.
         for key, clean in (('data_path', _clean_path),
+                           ('local_state_path', _clean_path),
                            ('listen_ip', _clean_text),
                            ('listen_port', _clean_port)):
             if key not in config_data:
@@ -97,6 +114,22 @@ class Config:
     def snapshot_dir(self):
         return os.path.join(self.data_path, 'snapshots')
 
+    def check_paths(self):
+        """Refuse a configuration that puts local state inside data_path.
+
+        Nesting the two would silently disable the producer check the moment
+        someone copies their data directory to another machine, so this is a
+        hard error rather than a warning.
+        """
+        data = os.path.realpath(self.data_path)
+        state = os.path.realpath(self.local_state_path)
+        if data == state:
+            raise ValueError('local_state_path must not be data_path')
+        for parent, child, name in ((data, state, 'local_state_path'),
+                                    (state, data, 'data_path')):
+            if child.startswith(parent.rstrip(os.sep) + os.sep):
+                raise ValueError(f'{name} must not live inside the other path')
+
     @property
     def devices_dir(self):
         return os.path.join(self.data_path, 'devices')
@@ -111,14 +144,17 @@ class Config:
 
     def ensure_dirs(self):
         """Create every data directory the application relies on."""
+        self.check_paths()
         for path in (self.data_path, self.snapshot_dir, self.devices_dir,
-                     self.backup_log_dir, self.scan_log_dir):
+                     self.backup_log_dir, self.scan_log_dir,
+                     self.local_state_path):
             os.makedirs(path, exist_ok=True)
 
     def to_dict(self):
         """Return configuration as a dictionary"""
         return {
             'data_path': self.data_path,
+            'local_state_path': self.local_state_path,
             'listen_ip': self.listen_ip,
             'listen_port': self.listen_port,
         }

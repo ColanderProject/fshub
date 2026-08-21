@@ -24,6 +24,7 @@ from fshub.scan_logs import (
     scan_duration,
 )
 from fshub.scanning import is_related_path, run_scan_to_snapshot
+from fshub.snapshot import layout
 
 
 @pytest.mark.parametrize('attributes,expected', [
@@ -69,13 +70,14 @@ def test_scan_counters_accumulate(config, sample_tree):
     assert result['duration'] == result['finish_time'] - result['start_time']
 
 
-def test_scan_snapshot_keeps_cloud_state_aligned_with_files(config, sample_tree):
+def test_scan_snapshot_uses_the_compact_cloud_state_form(config, sample_tree):
+    """An all-null directory must store the scalar null, not a list of nulls."""
     result = run_scan_to_snapshot(str(sample_tree))
-    with gzip.open(result['result_path'], 'rt', encoding='utf-8') as snapshot:
+    base = os.path.join(result['snapshot_path'], 'base_gen_000000.jsonl.gz')
+    with gzip.open(base, 'rt', encoding='utf-8') as snapshot:
         records = [json.loads(line) for line in snapshot]
 
-    assert all(len(record['c']) == len(record['f']) for record in records)
-    assert all(state is None for record in records for state in record['c'])
+    assert all(record['c'] is None for record in records)
 
 
 def test_scan_skip_prefixes(config, sample_tree):
@@ -191,7 +193,7 @@ def test_scan_status_and_log_survive_registry_loss(client, sample_tree):
         scans_module.running_scans.pop(scan_id, None)
     restored = client.get(f'/api/v1/scan/{scan_id}').get_json()
     assert restored['status'] == 'completed'
-    assert restored['result_file'] == status['result_file']
+    assert restored['snapshot_id'] == status['snapshot_id']
 
 
 def test_scan_access_errors_are_written_immediately(config, sample_tree, monkeypatch):
@@ -270,7 +272,7 @@ def test_unfinished_and_failed_scan_statuses_are_restored(client):
     assert failed_status['finish_time'] is not None
     assert failed_status['duration'] == scan_duration(
         failed_status['start_time'], failed_status['finish_time'], 'error')
-    assert failed_status['result_file'] is None
+    assert failed_status['snapshot_id'] is None
     assert failed_status['error'] == 'boom'
 
 
@@ -405,12 +407,12 @@ def test_unknown_scan_id_is_404_for_status_and_log(client, scan_id):
 
 
 def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_path):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'out'
     response = client.post('/api/v1/backup/folder', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
     })
@@ -433,12 +435,12 @@ def test_folder_backup_copies_files(client, scanned_snapshot, sample_tree, tmp_p
 def test_zip_backup_creates_archive(client, scanned_snapshot, sample_tree, tmp_path):
     import zipfile
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'zips'
     response = client.post('/api/v1/backup/zip', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
     })
@@ -459,30 +461,30 @@ def test_zip_backup_creates_archive(client, scanned_snapshot, sample_tree, tmp_p
 
 
 def test_backup_validates_input(client, scanned_snapshot, tmp_path):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
 
     assert client.post('/api/v1/backup/folder', json={
-        'snapshot_filename': scanned_snapshot}).status_code == 400
+        'snapshot_id': scanned_snapshot}).status_code == 400
 
     assert client.post('/api/v1/backup/folder', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': 'relative/path',
         'filter_in': [],
     }).status_code == 400
 
     assert client.post('/api/v1/backup/zip', json={
-        'snapshot_filename': 'not_loaded.jsonl.gz',
+        'snapshot_id': 'not_loaded.jsonl.gz',
         'target_path': str(tmp_path),
     }).status_code == 400
 
 
 def test_backup_dry_run_does_not_write(client, scanned_snapshot, sample_tree, tmp_path):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'dry'
     data = client.post('/api/v1/backup/folder', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
         'dry_run': True,
@@ -494,11 +496,11 @@ def test_backup_dry_run_does_not_write(client, scanned_snapshot, sample_tree, tm
 
 
 def test_hash_calculate_and_duplicates(client, scanned_snapshot, sample_tree):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     response = client.post('/api/v1/hash/calculate', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'filter_in': ['all'],
     })
     assert response.status_code == 202
@@ -510,7 +512,7 @@ def test_hash_calculate_and_duplicates(client, scanned_snapshot, sample_tree):
 
     # Distinct contents and sizes, so no duplicates.
     response = client.post('/api/v1/hash/duplicates', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'filter_in': ['all'],
     })
     dupes = wait_for_hash_task(client, response.get_json()['task_id'])['result']
@@ -518,9 +520,9 @@ def test_hash_calculate_and_duplicates(client, scanned_snapshot, sample_tree):
 
 
 def test_hash_rejects_unknown_algorithm(client, scanned_snapshot):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     response = client.post('/api/v1/hash/calculate', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'algorithm': 'rot13',
     })
     assert response.status_code == 400
@@ -529,11 +531,11 @@ def test_hash_rejects_unknown_algorithm(client, scanned_snapshot):
 
 def _select_and_backup(client, snapshot, tree, target, backup_type='folder', **extra):
     """Put every file in one group and start a backup of it."""
-    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': snapshot})
     select_all_files(client, snapshot, tree)
 
     payload = {
-        'snapshot_filename': snapshot,
+        'snapshot_id': snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
     }
@@ -545,12 +547,12 @@ def _select_and_backup(client, snapshot, tree, target, backup_type='folder', **e
 def test_backup_of_a_stale_snapshot_reports_failures(client, scanned_snapshot, sample_tree,
                                                      tmp_path, backup_type):
     """A file that could not be copied must never count as backed up."""
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
     os.remove(os.path.join(str(sample_tree), 'a.txt'))
 
     response = client.post(f'/api/v1/backup/{backup_type}', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(tmp_path / 'out'),
         'filter_in': ['all'],
     })
@@ -610,7 +612,7 @@ def test_zip_source_read_failure_leaves_no_partial_member(
     """A source that fails halfway must not leave a restorable truncated file."""
     import zipfile
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
     failing_path = os.path.join(str(sample_tree), 'a.txt')
     real_open = open
@@ -641,7 +643,7 @@ def test_zip_source_read_failure_leaves_no_partial_member(
     monkeypatch.setattr(backup_module, 'open', failing_open, raising=False)
     target = tmp_path / 'zips'
     response = client.post('/api/v1/backup/zip', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
     })
@@ -723,10 +725,10 @@ def test_backup_target_must_be_a_directory(client, scanned_snapshot, sample_tree
 
 def test_two_scans_in_the_same_second_get_separate_snapshots(config, sample_tree, monkeypatch):
     """Same timestamp and entry count must not overwrite an hours-long scan."""
-    monkeypatch.setattr(scanning.time, 'time', lambda: 1700000000)
+    monkeypatch.setattr(layout.time, 'time', lambda: 1700000000)
 
-    first = run_scan_to_snapshot(str(sample_tree))['result_file']
-    second = run_scan_to_snapshot(str(sample_tree))['result_file']
+    first = run_scan_to_snapshot(str(sample_tree))['snapshot_id']
+    second = run_scan_to_snapshot(str(sample_tree))['snapshot_id']
 
     assert first != second
     assert len(os.listdir(config.snapshot_dir)) == 2

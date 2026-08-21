@@ -123,7 +123,7 @@ class ScanRunLog:
             self._disable_log(error)
 
     def _write_status(self, status, counters, *, finish_time=None,
-                      error=None, result_file=None):
+                      error=None, snapshot_id=None):
         payload = {
             'scan_id': self.scan_id,
             'path': self.scan_path,
@@ -132,7 +132,7 @@ class ScanRunLog:
             'finish_time': finish_time,
             'counters': _counter_snapshot(counters),
             'error': error,
-            'result_file': result_file,
+            'snapshot_id': snapshot_id,
             'log_available': self.available,
         }
         temp_path = self.status_path + '.tmp'
@@ -147,7 +147,7 @@ class ScanRunLog:
             except OSError:
                 pass
 
-    def started(self, path, use_index=False, skip_paths=None):
+    def started(self, path, skip_paths=None):
         self.start_time = _timestamp()
         self.scan_path = path
         counters = {
@@ -161,7 +161,6 @@ class ScanRunLog:
             'started',
             flush=True,
             path=path,
-            use_index=use_index,
             skip_paths=list(skip_paths or []),
         )
         self._write_status('running', counters)
@@ -177,7 +176,7 @@ class ScanRunLog:
     def scan_error(self, message, _counters):
         self._append('scan_error', flush=True, message=str(message))
 
-    def completed(self, counters, result_file):
+    def completed(self, counters, snapshot_id):
         finish_time = _timestamp()
         status = ('completed_with_errors'
                   if counters.get('error_count', len(counters.get('errors', [])))
@@ -186,13 +185,13 @@ class ScanRunLog:
             'completed',
             flush=True,
             counters=_counter_snapshot(counters),
-            result_file=result_file,
+            snapshot_id=snapshot_id,
         )
         self._write_status(
             status,
             counters,
             finish_time=finish_time,
-            result_file=result_file,
+            snapshot_id=snapshot_id,
         )
         self.close()
         return finish_time

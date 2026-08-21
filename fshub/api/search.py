@@ -35,13 +35,13 @@ def search_files():
     """Search for files/folders by name across the requested snapshots"""
     data = json_body()
     query = data.get('query', '')
-    snapshot_files = data.get('snapshots', [])
+    snapshot_ids = data.get('snapshots', [])
 
     if not isinstance(query, str) or not query:
         return jsonify({'error': 'Query is required'}), 400
 
-    if not isinstance(snapshot_files, list) or not all(
-            isinstance(name, str) for name in snapshot_files):
+    if not isinstance(snapshot_ids, list) or not all(
+            isinstance(name, str) for name in snapshot_ids):
         return jsonify({'error': 'snapshots must be a list of strings'}), 400
 
     query = query.lower()
@@ -56,16 +56,16 @@ def search_files():
     # Grab the entries themselves under the lock: a concurrent
     # /api/v1/unload_snapshot must not make this request blow up.
     with snapshots_lock:
-        if not snapshot_files:
-            snapshot_files = list(loaded_snapshots.keys())
+        if not snapshot_ids:
+            snapshot_ids = list(loaded_snapshots.keys())
 
-        unloaded = [name for name in snapshot_files if name not in loaded_snapshots]
+        unloaded = [name for name in snapshot_ids if name not in loaded_snapshots]
         if unloaded:
             return jsonify({
                 'error': f'The following snapshots are not loaded: {", ".join(unloaded)}'
             }), 400
 
-        targets = [(name, loaded_snapshots[name]) for name in snapshot_files]
+        targets = [(name, loaded_snapshots[name]) for name in snapshot_ids]
 
     mode, term = _parse_query(query)
     results = []
@@ -75,9 +75,9 @@ def search_files():
     # as truncated.
     hard_stop = limit + 1
 
-    for snapshot_filename, entry in targets:
+    for snapshot_id, entry in targets:
         snapshot_data = entry['data']
-        snapshot_os = snapshot_data[0].get('os_name') if snapshot_data else None
+        snapshot_os = entry['os_name']
 
         for path_obj in snapshot_data:
             if truncated:
@@ -85,21 +85,19 @@ def search_files():
             current_path = path_obj['p']
             web_path = to_web_path(current_path, snapshot_os)
 
-            for i, filename in enumerate(path_obj.get('f', [])):
+            for i, filename in enumerate(path_obj['f']):
                 if not _matches(filename, mode, term):
                     continue
 
-                result = {
+                results.append({
                     'type': 'file',
                     'name': filename,
                     'path': web_path,
                     'full_path': join_snapshot_path(current_path, filename, snapshot_os=snapshot_os),
-                    'size': path_obj['s'][i] if i < len(path_obj.get('s', [])) else 0,
-                    'snapshot': snapshot_filename
-                }
-                if i < len(path_obj.get('t', [])):
-                    result['timestamps'] = path_obj['t'][i]
-                results.append(result)
+                    'size': path_obj['s'][i],
+                    'timestamps': path_obj['t'][i],
+                    'snapshot': snapshot_id
+                })
 
                 if len(results) >= hard_stop:
                     truncated = True
@@ -108,7 +106,7 @@ def search_files():
             if truncated:
                 break
 
-            for dirname in path_obj.get('d', []):
+            for dirname in path_obj['d']:
                 if not _matches(dirname, mode, term):
                     continue
 
@@ -117,7 +115,7 @@ def search_files():
                     'name': dirname,
                     'path': web_path,
                     'full_path': join_snapshot_path(current_path, dirname, snapshot_os=snapshot_os),
-                    'snapshot': snapshot_filename
+                    'snapshot': snapshot_id
                 })
 
                 if len(results) >= hard_stop:

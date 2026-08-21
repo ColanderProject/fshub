@@ -17,7 +17,7 @@ from .explorer import (
 group_bp = Blueprint('group_bp', __name__)
 
 
-def _read_group_request(snapshot_filename):
+def _read_group_request(snapshot_id):
     """Validate a group mutation request.
 
     Returns (path, group_name, None) or (None, None, (payload, status)).
@@ -35,11 +35,10 @@ def _read_group_request(snapshot_filename):
         return None, None, ({'error': 'Path and group name are required'}, 400)
 
     with snapshots_lock:
-        entry = loaded_snapshots.get(snapshot_filename)
+        entry = loaded_snapshots.get(snapshot_id)
         if entry is None:
             return None, None, ({'error': 'Snapshot not loaded'}, 400)
-        data_rows = entry['data']
-        snapshot_os = data_rows[0].get('os_name') if data_rows else None
+        snapshot_os = entry['os_name']
 
     # The UI navigates in web paths (/C:/Users), the snapshot is indexed by
     # native ones (C:\Users). Convert here so a group entry always matches.
@@ -48,8 +47,8 @@ def _read_group_request(snapshot_filename):
     return item_path, group_name, None
 
 
-def _mutate_group(snapshot_filename, item_type, action_type):
-    item_path, group_name, error = _read_group_request(snapshot_filename)
+def _mutate_group(snapshot_id, item_type, action_type):
+    item_path, group_name, error = _read_group_request(snapshot_id)
     if error:
         payload, status = error
         return jsonify(payload), status
@@ -59,12 +58,12 @@ def _mutate_group(snapshot_filename, item_type, action_type):
     # group changes meaning after a reload. The log is written first so a
     # failed write never leaves an unpersisted in-memory change.
     with snapshots_lock:
-        entry = loaded_snapshots.get(snapshot_filename)
+        entry = loaded_snapshots.get(snapshot_id)
         if entry is None:
             return jsonify({'error': 'Snapshot not loaded'}), 400
 
         try:
-            save_group_action(snapshot_filename, item_path, item_type, group_name, action_type)
+            save_group_action(snapshot_id, item_path, item_type, group_name, action_type)
         except UnsafePathError as e:
             return jsonify({'error': str(e)}), 400
         except OSError as e:
@@ -79,11 +78,11 @@ def _mutate_group(snapshot_filename, item_type, action_type):
     return jsonify({'success': True})
 
 
-@group_bp.route('/api/v1/groups/<snapshot_filename>', methods=['GET'])
-def get_groups(snapshot_filename):
+@group_bp.route('/api/v1/groups/<snapshot_id>', methods=['GET'])
+def get_groups(snapshot_id):
     """Get all groups for a specific snapshot with file and directory counts"""
     with snapshots_lock:
-        entry = loaded_snapshots.get(snapshot_filename)
+        entry = loaded_snapshots.get(snapshot_id)
         if entry is None:
             return jsonify({'error': 'Snapshot not loaded'}), 400
 
@@ -101,32 +100,32 @@ def get_groups(snapshot_filename):
     return jsonify({'groups': groups_with_counts})
 
 
-@group_bp.route('/api/v1/group/<snapshot_filename>/add_file', methods=['POST'])
-def add_file_to_group(snapshot_filename):
+@group_bp.route('/api/v1/group/<snapshot_id>/add_file', methods=['POST'])
+def add_file_to_group(snapshot_id):
     """Add a file to a group"""
-    return _mutate_group(snapshot_filename, 'f', 'add')
+    return _mutate_group(snapshot_id, 'f', 'add')
 
 
-@group_bp.route('/api/v1/group/<snapshot_filename>/add_dir', methods=['POST'])
-def add_dir_to_group(snapshot_filename):
+@group_bp.route('/api/v1/group/<snapshot_id>/add_dir', methods=['POST'])
+def add_dir_to_group(snapshot_id):
     """Add a directory to a group"""
-    return _mutate_group(snapshot_filename, 'd', 'add')
+    return _mutate_group(snapshot_id, 'd', 'add')
 
 
-@group_bp.route('/api/v1/group/<snapshot_filename>/remove_file', methods=['POST'])
-def remove_file_from_group(snapshot_filename):
+@group_bp.route('/api/v1/group/<snapshot_id>/remove_file', methods=['POST'])
+def remove_file_from_group(snapshot_id):
     """Remove a file from a group"""
-    return _mutate_group(snapshot_filename, 'f', 'del')
+    return _mutate_group(snapshot_id, 'f', 'del')
 
 
-@group_bp.route('/api/v1/group/<snapshot_filename>/remove_dir', methods=['POST'])
-def remove_dir_from_group(snapshot_filename):
+@group_bp.route('/api/v1/group/<snapshot_id>/remove_dir', methods=['POST'])
+def remove_dir_from_group(snapshot_id):
     """Remove a directory from a group"""
-    return _mutate_group(snapshot_filename, 'd', 'del')
+    return _mutate_group(snapshot_id, 'd', 'del')
 
 
-@group_bp.route('/api/v1/group/<snapshot_filename>/files', methods=['GET'])
-def get_files_in_group(snapshot_filename):
+@group_bp.route('/api/v1/group/<snapshot_id>/files', methods=['GET'])
+def get_files_in_group(snapshot_id):
     """Get all files and directories in a specific group"""
     group_name = request.args.get('group_name', '')
 
@@ -134,7 +133,7 @@ def get_files_in_group(snapshot_filename):
         return jsonify({'error': 'Group name is required'}), 400
 
     with snapshots_lock:
-        entry = loaded_snapshots.get(snapshot_filename)
+        entry = loaded_snapshots.get(snapshot_id)
         if entry is None:
             return jsonify({'error': 'Snapshot not loaded'}), 400
 
@@ -149,9 +148,9 @@ def get_files_in_group(snapshot_filename):
     })
 
 
-def save_group_action(snapshot_filename, path, item_type, group_name, action_type):
+def save_group_action(snapshot_id, path, item_type, group_name, action_type):
     """Append a group action to the snapshot's group log"""
     action = [path, item_type, group_name, action_type, int(datetime.now().timestamp())]
 
-    with open(groups_path(snapshot_filename), 'a', encoding='utf-8') as f:
+    with open(groups_path(snapshot_id), 'a', encoding='utf-8') as f:
         f.write(json.dumps(action) + '\n')

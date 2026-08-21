@@ -196,11 +196,11 @@ def _prepare_backup(data, backup_type):
 
     Returns (context_dict, None) or (None, (payload, status)).
     """
-    snapshot_filename = data.get('snapshot_filename', '')
+    snapshot_id = data.get('snapshot_id', '')
     target_path = data.get('target_path', '')
 
-    if not isinstance(snapshot_filename, str) or not snapshot_filename:
-        return None, ({'error': 'snapshot_filename must be a non-empty string'}, 400)
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        return None, ({'error': 'snapshot_id must be a non-empty string'}, 400)
     if not isinstance(target_path, str) or not target_path:
         return None, ({'error': 'target_path must be a non-empty string'}, 400)
 
@@ -208,8 +208,8 @@ def _prepare_backup(data, backup_type):
     if not isinstance(dry_run, bool):
         return None, ({'error': 'dry_run must be a boolean'}, 400)
 
-    if snapshot_filename not in loaded_snapshots:
-        return None, ({'error': f'Snapshot not loaded: {snapshot_filename}'}, 400)
+    if snapshot_id not in loaded_snapshots:
+        return None, ({'error': f'Snapshot not loaded: {snapshot_id}'}, 400)
 
     if not os.path.isabs(target_path):
         return None, ({'error': 'target_path must be an absolute path'}, 400)
@@ -225,13 +225,13 @@ def _prepare_backup(data, backup_type):
     if filter_error:
         return None, ({'error': filter_error}, 400)
 
-    snapshot_os = get_snapshot_os(snapshot_filename)
-    files_to_backup = get_filtered_files(snapshot_filename, filter_in, filter_out)
+    snapshot_os = get_snapshot_os(snapshot_id)
+    files_to_backup = get_filtered_files(snapshot_id, filter_in, filter_out)
     if not files_to_backup:
         return None, ({'error': 'No files to backup with the given filters'}, 400)
 
     return {
-        'snapshot_filename': snapshot_filename,
+        'snapshot_id': snapshot_id,
         'snapshot_os': snapshot_os,
         'target_path': os.path.realpath(target_path),
         'files': files_to_backup,
@@ -240,7 +240,7 @@ def _prepare_backup(data, backup_type):
             'backup_name': data.get('backup_name', 'backup'),
             'filter_in': filter_in,
             'filter_out': filter_out,
-            'snapshot': snapshot_filename,
+            'snapshot': snapshot_id,
             'backup_type': backup_type,
             'target_path': target_path,
         },

@@ -85,7 +85,7 @@ Everything lives under `data_path`:
 
 ```
 ~/.fshub/
-├── snapshots/   # snapshot_<ts>_<count>_<uuid>.jsonl.gz and their *_groups.jl logs
+├── snapshots/   # one directory per snapshot: manifests, base, increments, groups.jl
 ├── devices/     # devices_<host>.jl, media_<host>.jl
 ├── scan_logs/   # detailed JSONL logs plus compact latest-status sidecars
 └── backups/     # one JSONL log per backup run

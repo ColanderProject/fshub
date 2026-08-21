@@ -5,7 +5,13 @@ import sys
 
 import pytest
 
-from conftest import select_all_files, wait_for_hash_task, wait_for_task, write_snapshot
+from conftest import (
+    make_record,
+    select_all_files,
+    wait_for_hash_task,
+    wait_for_task,
+    write_snapshot,
+)
 
 from fshub.api.explorer import get_filtered_files, load_snapshot_file, loaded_snapshots
 from fshub.utils import snapshot_relative_path
@@ -31,7 +37,7 @@ def test_backslash_in_posix_name_is_not_a_separator():
 def test_folder_backup_refuses_symlinked_destination(client, scanned_snapshot,
                                                      sample_tree, tmp_path):
     """A symlink inside the target must not let copy2 write straight through it."""
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     source = os.path.join(str(sample_tree), 'a.txt')
     client.post(f'/api/v1/group/{scanned_snapshot}/add_file',
                 json={'path': source, 'group_name': 'one'})
@@ -46,7 +52,7 @@ def test_folder_backup_refuses_symlinked_destination(client, scanned_snapshot,
     dest.symlink_to(outside)
 
     response = client.post('/api/v1/backup/folder', json={
-        'snapshot_filename': scanned_snapshot,
+        'snapshot_id': scanned_snapshot,
         'target_path': str(target),
         'filter_in': ['one'],
     })
@@ -64,18 +70,13 @@ def test_filtered_traversal_survives_a_deep_tree(config, app):
     for level in range(depth):
         node_path = '/' + '/'.join(f'd{i}' for i in range(level + 1))
         children = [f'd{level + 1}'] if level + 1 < depth else []
-        records.append({
-            'p': node_path,
-            'f': ['leaf'] if not children else [],
-            's': [7] if not children else [],
-            't': [[0, 0, 0]] if not children else [],
-            'd': children,
-            'T': [[0, 0, 0]] if children else [],
-        })
-    records[0]['os_name'] = 'Linux'
+        records.append(make_record(
+            node_path,
+            files=[] if children else [('leaf', 7)],
+            dirs=children,
+        ))
 
-    name = f'snapshot_3_{depth}.jsonl.gz'
-    write_snapshot(config, name, records)
+    name = write_snapshot(config, records, root_path='/d0')
     assert load_snapshot_file(name)
 
     files = get_filtered_files(name, [], [])
@@ -84,7 +85,7 @@ def test_filtered_traversal_survives_a_deep_tree(config, app):
 
 
 def test_filtered_files_keep_listing_order(client, scanned_snapshot):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     files = get_filtered_files(scanned_snapshot, [], [])
     assert [f['name'] for f in files] == ['a.txt', 'b.txt', 'c.txt']
 
@@ -97,11 +98,11 @@ def test_empty_files_are_reported_as_duplicates(client, config, tmp_path):
     (tree / 'one').write_bytes(b'')
     (tree / 'two').write_bytes(b'')
 
-    snapshot = run_scan_to_snapshot(str(tree))['result_file']
-    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+    snapshot = run_scan_to_snapshot(str(tree))['snapshot_id']
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': snapshot})
 
     response = client.post('/api/v1/hash/duplicates', json={
-        'snapshot_filename': snapshot})
+        'snapshot_id': snapshot})
     data = wait_for_hash_task(client, response.get_json()['task_id'])['result']
 
     assert len(data['duplicates']) == 1
@@ -110,7 +111,7 @@ def test_empty_files_are_reported_as_duplicates(client, config, tmp_path):
 
 
 def test_exactly_limit_results_is_not_truncated(client, scanned_snapshot):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
 
     data = client.post('/api/v1/search', json={'query': '.txt', 'limit': 3}).get_json()
     assert data['count'] == 3
@@ -122,7 +123,7 @@ def test_exactly_limit_results_is_not_truncated(client, scanned_snapshot):
 
 
 def test_group_mutation_rejects_non_string_fields(client, scanned_snapshot):
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
 
     for payload in ({'path': '/x', 'group_name': []},
                     {'path': ['/x'], 'group_name': 'g'},
@@ -136,7 +137,7 @@ def test_group_log_and_memory_agree_after_concurrent_writes(client, scanned_snap
     """The persisted log must match memory, whatever the interleaving."""
     import threading
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     target = os.path.join(str(sample_tree), 'a.txt')
 
     def toggle(action):
@@ -152,8 +153,8 @@ def test_group_log_and_memory_agree_after_concurrent_writes(client, scanned_snap
         t.join()
 
     in_memory = set(loaded_snapshots[scanned_snapshot]['groups']['g']['f'])
-    client.post('/api/v1/unload_snapshot', json={'filename': scanned_snapshot})
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/unload_snapshot', json={'snapshot_id': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     from_disk = set(loaded_snapshots[scanned_snapshot]['groups']['g']['f'])
 
     assert in_memory == from_disk
@@ -259,8 +260,8 @@ def test_backslash_name_survives_scan_to_backup(client, config, tmp_path):
     # A file whose name starts with a backslash.
     (tree / '\\odd.txt').write_bytes(b'leading-backslash')
 
-    snapshot = run_scan_to_snapshot(str(tree))['result_file']
-    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+    snapshot = run_scan_to_snapshot(str(tree))['snapshot_id']
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': snapshot})
 
     paths = {f['full_path'] for f in get_filtered_files(snapshot, [], [])}
     assert str(tree / 'a' / 'b' / 'inner.txt') in paths
@@ -274,7 +275,7 @@ def test_backslash_name_survives_scan_to_backup(client, config, tmp_path):
 
     target = tmp_path / 'zips'
     response = client.post('/api/v1/backup/zip', json={
-        'snapshot_filename': snapshot,
+        'snapshot_id': snapshot,
         'target_path': str(target),
         'filter_in': ['all'],
     })
@@ -299,11 +300,11 @@ def test_hashing_reads_a_backslash_name(client, config, tmp_path):
     (tree / 'a\\b').mkdir(parents=True)
     (tree / 'a\\b' / 'inner.txt').write_bytes(b'odd-dir')
 
-    snapshot = run_scan_to_snapshot(str(tree))['result_file']
-    client.post('/api/v1/load_snapshot', json={'filename': snapshot})
+    snapshot = run_scan_to_snapshot(str(tree))['snapshot_id']
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': snapshot})
 
     response = client.post('/api/v1/hash/calculate',
-                           json={'snapshot_filename': snapshot})
+                           json={'snapshot_id': snapshot})
     data = wait_for_hash_task(client, response.get_json()['task_id'])['result']
     assert data['files_processed'] == 1
     assert data['files_failed'] == 0
@@ -314,7 +315,7 @@ def test_second_zip_backup_does_not_destroy_the_first(client, scanned_snapshot,
     """Both runs write into one directory; neither may clobber the other."""
     import zipfile
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'zips'
@@ -322,7 +323,7 @@ def test_second_zip_backup_does_not_destroy_the_first(client, scanned_snapshot,
 
     for run in ('first', 'second'):
         response = client.post('/api/v1/backup/zip', json={
-            'snapshot_filename': scanned_snapshot,
+            'snapshot_id': scanned_snapshot,
             'target_path': str(target),
             'filter_in': ['all'],
             'backup_name': run,
@@ -382,16 +383,14 @@ def test_device_rejects_bad_host_name_and_media(client):
 # --- third review round --------------------------------------------------
 
 
-def _this_pc_snapshot():
+def _this_pc_snapshot(config):
     """A 'This PC' snapshot: / -> C:\\ -> C:\\Users -> C:\\Users\\me."""
-    return [
-        {'p': '/', 'f': [], 's': [], 't': [], 'd': ['C:'], 'T': [[0, 0, 0]],
-         'os_name': 'Windows'},
-        {'p': 'C:\\', 'f': [], 's': [], 't': [], 'd': ['Users'], 'T': [[0, 0, 0]]},
-        {'p': 'C:\\Users', 'f': [], 's': [], 't': [], 'd': ['me'], 'T': [[0, 0, 0]]},
-        {'p': 'C:\\Users\\me', 'f': ['doc.txt', 'skip.txt'], 's': [11, 22],
-         't': [[0, 0, 0], [0, 0, 0]], 'd': [], 'T': []},
-    ]
+    return write_snapshot(config, [
+        make_record('/', dirs=['C:']),
+        make_record('C:\\', dirs=['Users']),
+        make_record('C:\\Users', dirs=['me']),
+        make_record('C:\\Users\\me', files=[('doc.txt', 11), ('skip.txt', 22)]),
+    ], os_name='Windows', root_path='/')
 
 
 def test_filter_in_reaches_below_a_windows_drive(client, config):
@@ -401,9 +400,8 @@ def test_filter_in_reaches_below_a_windows_drive(client, config):
     filter_in selection was pruned at the 'This PC' root and backups of a
     Windows snapshot silently produced nothing.
     """
-    name = 'snapshot_9_4.jsonl.gz'
-    write_snapshot(config, name, _this_pc_snapshot())
-    client.post('/api/v1/load_snapshot', json={'filename': name})
+    name = _this_pc_snapshot(config)
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': name})
 
     client.post(f'/api/v1/group/{name}/add_file',
                 json={'path': 'C:\\Users\\me\\doc.txt', 'group_name': 'pick'})
@@ -413,9 +411,8 @@ def test_filter_in_reaches_below_a_windows_drive(client, config):
 
 
 def test_filter_in_on_a_windows_directory_selects_the_subtree(client, config):
-    name = 'snapshot_9_4.jsonl.gz'
-    write_snapshot(config, name, _this_pc_snapshot())
-    client.post('/api/v1/load_snapshot', json={'filename': name})
+    name = _this_pc_snapshot(config)
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': name})
 
     client.post(f'/api/v1/group/{name}/add_dir',
                 json={'path': 'C:\\Users\\me', 'group_name': 'pick'})
@@ -439,13 +436,13 @@ def test_backups_started_in_the_same_second_do_not_collide(client, config, scann
 
     monkeypatch.setattr(backup_module.time, 'time', lambda: 1000.0)
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     target = tmp_path / 'zips'
     for _ in range(2):
         response = client.post('/api/v1/backup/zip', json={
-            'snapshot_filename': scanned_snapshot,
+            'snapshot_id': scanned_snapshot,
             'target_path': str(target),
             'filter_in': ['all'],
         })
@@ -471,12 +468,12 @@ def test_folder_backups_in_the_same_second_keep_separate_logs(client, config, sc
 
     monkeypatch.setattr(backup_module.time, 'time', lambda: 1000.0)
 
-    client.post('/api/v1/load_snapshot', json={'filename': scanned_snapshot})
+    client.post('/api/v1/load_snapshot', json={'snapshot_id': scanned_snapshot})
     select_all_files(client, scanned_snapshot, sample_tree)
 
     for i in range(2):
         response = client.post('/api/v1/backup/folder', json={
-            'snapshot_filename': scanned_snapshot,
+            'snapshot_id': scanned_snapshot,
             'target_path': str(tmp_path / f'out{i}'),
             'filter_in': ['all'],
         })

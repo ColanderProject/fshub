@@ -9,7 +9,6 @@ from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
-from ..config import get_config
 from ..scan_logs import (
     MAX_REPORTED_ERRORS,
     ScanRunLog,
@@ -18,9 +17,12 @@ from ..scan_logs import (
     read_scan_status,
     scan_duration,
 )
-from ..scanning import is_related_path, run_scan_to_snapshot
+from ..scanning import is_related_path, run_incremental_scan, run_scan_to_snapshot
+from ..snapshot import InvalidSnapshot, SnapshotLayout
+from ..snapshot.manifest import newest_valid_manifest
+from ..utils import UnsafePathError
 from . import json_body
-from .explorer import list_snapshot_files
+from .explorer import list_snapshots, snapshot_dir
 
 scan_bp = Blueprint('scan_bp', __name__)
 
@@ -52,10 +54,6 @@ def start_scan():
     data = json_body()
     scan_path = data.get('path', '')
     skip_paths = data.get('skip_paths', [])
-    use_index = data.get('use_index', False)
-
-    if not isinstance(use_index, bool):
-        return jsonify({'error': 'use_index must be a boolean'}), 400
 
     if not isinstance(skip_paths, list) or not all(
             isinstance(path, str) and path for path in skip_paths):
@@ -84,13 +82,12 @@ def start_scan():
         scan_id = str(uuid.uuid4())
         counters = {}
         run_log = ScanRunLog(scan_id)
-        run_log.started(scan_path, use_index=use_index, skip_paths=skip_paths)
+        run_log.started(scan_path, skip_paths=skip_paths)
 
         def run_scan():
             try:
                 result = run_scan_to_snapshot(
                     scan_path,
-                    use_index=use_index,
                     counters=counters,
                     skip_prefixes=skip_paths,
                     run_log=run_log,
@@ -110,7 +107,7 @@ def start_scan():
                     running_scans[scan_id]['status'] = (
                         'completed_with_errors' if counters.get('error_count', 0)
                         else 'completed')
-                    running_scans[scan_id]['result_file'] = result['result_file']
+                    running_scans[scan_id]['snapshot_id'] = result['snapshot_id']
                     running_scans[scan_id]['counters'] = counters
                     running_scans[scan_id]['finish_time'] = result['finish_time']
 
@@ -127,6 +124,81 @@ def start_scan():
         thread.start()
 
     return jsonify({'scan_id': scan_id, 'status': 'started'})
+
+
+@scan_bp.route('/api/v1/rescan', methods=['POST'])
+def start_rescan():
+    """Rescan an existing snapshot's scope and commit an increment.
+
+    The scope comes from the snapshot's manifest, so this endpoint takes no
+    path: an increment scanned with a different root or skip list would
+    describe a tree that was never observed as a whole.
+    """
+    data = json_body()
+    snapshot_id = data.get('snapshot_id', '')
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        return jsonify({'error': 'snapshot_id must be a non-empty string'}), 400
+
+    try:
+        layout = SnapshotLayout(snapshot_dir(snapshot_id))
+        manifest = newest_valid_manifest(layout)
+    except (UnsafePathError, InvalidSnapshot, OSError) as error:
+        return jsonify({'error': str(error)}), 400
+
+    scan_path = manifest.root_path
+    with scan_lock:
+        _prune_finished_scans()
+
+        for existing_id, info in running_scans.items():
+            if info['status'] == 'running' and is_related_path(info['path'], scan_path):
+                return jsonify({
+                    'error': f"Scan already running for related path: {info['path']}",
+                    'scan_id': existing_id,
+                }), 409
+
+        scan_id = str(uuid.uuid4())
+        counters = {}
+        run_log = ScanRunLog(scan_id)
+        run_log.started(scan_path,
+                        skip_paths=manifest.scan_scope['skip_prefixes_raw'])
+
+        def run():
+            try:
+                result = run_incremental_scan(snapshot_id, counters=counters,
+                                              run_log=run_log)
+            except Exception as e:  # noqa: BLE001 - surfaced through status
+                traceback.print_exc()
+                with scan_lock:
+                    if scan_id in running_scans:
+                        running_scans[scan_id]['status'] = 'error'
+                        running_scans[scan_id]['error'] = str(e)
+                        running_scans[scan_id]['finish_time'] = int(
+                            datetime.now().timestamp())
+                return
+
+            with scan_lock:
+                if scan_id in running_scans:
+                    running_scans[scan_id]['status'] = (
+                        'completed_with_errors' if counters.get('error_count', 0)
+                        else 'completed')
+                    running_scans[scan_id]['snapshot_id'] = snapshot_id
+                    running_scans[scan_id]['counters'] = counters
+                    running_scans[scan_id]['finish_time'] = result['finish_time']
+
+        thread = threading.Thread(target=run, daemon=True)
+        running_scans[scan_id] = {
+            'path': scan_path,
+            'status': 'running',
+            'start_time': run_log.start_time,
+            'counters': counters,
+            'error': None,
+            'finish_time': None,
+            'run_log': run_log,
+        }
+        thread.start()
+
+    return jsonify({'scan_id': scan_id, 'snapshot_id': snapshot_id,
+                    'status': 'started'})
 
 
 def _task_payload(scan_id, scan_info):
@@ -151,7 +223,7 @@ def _task_payload(scan_id, scan_info):
         'duration': scan_duration(start_time, finish_time, status),
         'counters': counters,
         'error': scan_info.get('error'),
-        'result_file': scan_info.get('result_file'),
+        'snapshot_id': scan_info.get('snapshot_id'),
         'log_available': scan_info['run_log'].available,
     }
 
@@ -216,19 +288,5 @@ def get_scan_log(scan_id):
 
 @scan_bp.route('/api/v1/scans', methods=['GET'])
 def get_all_scans():
-    """Get a list of all scan result files"""
-    snapshot_dir = get_config().snapshot_dir
-
-    scan_files = []
-    for file in list_snapshot_files(snapshot_dir):
-        try:
-            stat = os.stat(os.path.join(snapshot_dir, file))
-        except OSError:
-            continue
-        scan_files.append({
-            'filename': file,
-            'size': stat.st_size,
-            'modified': int(stat.st_mtime)
-        })
-
-    return jsonify({'scan_files': scan_files})
+    """Get every snapshot this installation has produced."""
+    return jsonify({'scan_files': list_snapshots()})

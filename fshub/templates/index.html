@@ -704,8 +704,11 @@
 
             data.snapshots.forEach(snapshot => {
                 const option = document.createElement('option');
-                option.value = snapshot.filename;
-                option.textContent = `${snapshot.filename} (${formatBytes(snapshot.size)})`;
+                option.value = snapshot.snapshot_id;
+                const state = snapshot.consistency && snapshot.consistency !== 'complete'
+                    ? ` [${snapshot.consistency}]` : '';
+                option.textContent = `${snapshot.root_path} @ gen ${snapshot.snapshot_generation}`
+                    + ` (${formatBytes(snapshot.total_size)}, ${snapshot.inc_count} inc)${state}`;
                 if (snapshot.loaded) {
                     option.textContent += ' [LOADED]';
                     option.dataset.loaded = 'true';
@@ -719,7 +722,7 @@
                 // Auto-select the first snapshot if none is selected
                 if (!currentSnapshot) {
                     const firstSnapshot = data.snapshots[0];
-                    currentSnapshot = firstSnapshot.filename;
+                    currentSnapshot = firstSnapshot.snapshot_id;
                     select.value = currentSnapshot;
                     if (firstSnapshot.loaded) {
                         await loadSnapshot(currentSnapshot);
@@ -776,7 +779,7 @@
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ filename: selectedValue }),
+                body: JSON.stringify({ snapshot_id: selectedValue }),
                 credentials: 'same-origin'
             });
 
@@ -1318,7 +1321,7 @@
             if (record.event === 'scan_error') return record.message || '';
             if (record.event === 'failed') return record.error || '';
             if (record.event === 'completed') {
-                return `Snapshot: ${record.result_file}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
+                return `Snapshot: ${record.snapshot_id}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
             }
             return `Current: ${counters.current_path || ''}; files: ${counters.scanned_count || 0}; size: ${formatBytes(counters.scanned_size || 0)}; errors: ${counters.error_count || 0}`;
         }
@@ -1656,7 +1659,7 @@
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    snapshot_filename: currentSnapshot,
+                    snapshot_id: currentSnapshot,
                     target_path: targetPath,
                     filter_in: filterIn,
                     filter_out: filterOut,
@@ -1904,7 +1907,7 @@
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    snapshot_filename: currentSnapshot,
+                    snapshot_id: currentSnapshot,
                     target_path: targetPath,
                     filter_in: filterIn,
                     filter_out: filterOut,

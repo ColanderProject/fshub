@@ -59,30 +59,94 @@ properties: `snapshot_dir`, `devices_dir`, `backup_log_dir`, `scan_log_dir`.
 
 ## Snapshot format
 
-A snapshot is a gzipped JSONL file, one record per directory:
+A snapshot is a directory, not a file. It holds one full **base** plus any
+number of **increments**, described by immutable **manifest revisions**:
+
+```
+snapshots/snapshot_<ts>_<rand>/
+├── manifests/manifest_rev_000000.json   one immutable revision per commit
+├── current                              cached latest revision, may be lost
+├── base_gen_000000.jsonl.gz
+├── increments/inc_gen_000001_<ts>.jsonl.gz
+├── gc.jsonl        superseded files awaiting collection
+├── writer.lock
+└── groups.jl       group actions, bound to the stable snapshot id
+```
+
+The full specification is `docs/design/incremental-snapshot.md`; the code lives
+in `fshub/snapshot/`. Base and increments use exactly the same gzipped JSONL
+record format, one record per directory:
 
 | key | meaning                                   |
 |-----|-------------------------------------------|
 | `p` | absolute directory path                    |
+| `i` | this directory's incarnation identity, `[provider_id, value]` or `null` |
 | `f` | file names                                 |
 | `s` | file sizes, parallel to `f`                |
 | `t` | file `[ctime, mtime, atime]`, parallel to `f` |
-| `c` | coarse cloud state, parallel to `f` (`null` for normal/unknown files) |
+| `c` | coarse cloud state, parallel to `f`, or the scalar `null` |
 | `d` | subdirectory names                         |
 | `T` | subdirectory `[ctime, mtime, atime]`, parallel to `d` |
+| `D` | subdirectory identities, parallel to `d`   |
+| `x` | subdirectory traversal state, parallel to `d` |
 
-All timestamps are Unix integers. On Windows, `c` is derived from the
-`st_file_attributes` already returned by `os.stat`; it does not add another
-per-file system call. Values are `pinned`, `not_fully_local`, `evictable`, or
-`null`. This is intentionally coarse: `UNPINNED` means Windows may evict a file,
-not that it currently occupies no local space. Older snapshots without `c`
-load with a `null` cloud state. The first record additionally carries the
-device info of the machine that produced it (`device_name`, `os_name`,
-`thumbprint`, `start_scan_time`, ...).
+Rules that are easy to break and expensive to debug:
 
-`fshub scan --use-index` writes the same data split into
-`<base>_index.jsonl.gz` (paths only) plus `<base>.bin.gz` (everything else);
-`explorer._read_snapshot_records` transparently loads either layout.
+- **every field is mandatory**, empty arrays are written as `[]`. A missing
+  field must fail at load time instead of degrading some API to an empty
+  result. After validation, code indexes fields directly.
+- **`c` has exactly one legal encoding per value**: the scalar `null` when no
+  file has a cloud state, otherwise a list as long as `f` with at least one
+  non-null entry. Two encodings for one value would break digest stability.
+- **names are sorted by exact code point**, no `normcase` and no Unicode
+  normalization, and the parallel arrays are permuted with them. This makes
+  records reproducible and lets identical content produce identical bytes.
+- **`ensure_ascii=True` is mandatory** (`fshub/snapshot/canonical.py`). Linux
+  file names are bytes; Python carries undecodable ones as unpaired
+  surrogates, and encoding those to UTF-8 raises. Never "improve readability"
+  by turning this off.
+- **`x` values** are `traversed`, `symlink`, `junction`, `skipped`, `denied`,
+  `error`, `cross_device`. Unknown values are rejected rather than treated as
+  "not traversed". `denied`/`error` degrade completeness; declared boundaries
+  do not.
+- device and scan metadata live in the manifest, **never** in the first record.
+
+An increment repeats the complete record of every directory that changed;
+later records replace earlier ones by path. There are no delete, tombstone or
+rename entries: a deletion is expressed by rewriting the parent directory.
+
+### Completeness
+
+Two independent axes, both exposed by the API:
+
+- `event_continuity` (`complete` / `gap` / `not_applicable`) folds over the
+  chain. A gap is sticky and only a successful full rescan clears it.
+- `observation_coverage` (`complete` / `partial`) is a function of the current
+  tree: it is `partial` exactly while a reachable directory is `denied` or
+  `error`.
+
+`consistency` is a lossy derived value. It is cached in the manifest and
+re-derived on every load; a mismatch is treated as a broken manifest.
+
+### Commit protocol
+
+Write payload files to `<name>.<pid>-<uuid>.tmp`, fsync, `os.replace`, fsync
+the directory, then publish one manifest revision the same way. Only files
+referenced by a published manifest are committed. `gzip.open()` hides the file
+descriptor, so writers use `open(path, 'wb')` plus `gzip.GzipFile(fileobj=...)`
+and close the gzip layer before fsyncing.
+
+Exclusion is one `flock`/`msvcrt.locking` writer lock per snapshot, shared by
+increments, compaction and GC. POSIX `fcntl(F_SETLK)` is deliberately not used:
+any closed descriptor drops every lock the process holds.
+
+### Producer identity
+
+`producer_id` lives in `local_state_path`, which must not be inside
+`data_path` (checked at startup). `data_path` is the directory people copy and
+restore; an id that travelled with it would let a second machine silently
+continue an increment chain. `calculate_thumbprint()` is provenance only — it
+changes on kernel upgrades and new network cards.
 
 ### Computed fields
 
@@ -90,9 +154,10 @@ On load, `S` (total logical size) and `C` (total file count) are computed for
 every directory, *including subdirectories*. `LS` and `LC` contain the same
 totals after excluding files whose cloud state is `not_fully_local`; the UI's
 “Count fully local files only” checkbox switches to these values. `LS` remains
-a logical-size total, not NTFS allocated bytes. These totals are computed iteratively in
-`_compute_recursive_totals`: an explicit child→parent map plus a memoised
-depth sort. Do not turn this back into a recursive walk — real trees exceed
+a logical-size total, not NTFS allocated bytes. These totals are recomputed on every load and never stored. They are computed
+iteratively in `fshub/snapshot/loader.py`, by walking the pre-order rebuild
+list backwards so every child is summed before its parent. Do not turn this
+back into a recursive walk — real trees exceed
 Python's recursion limit, and the Windows "This PC" root (`/` → `C:\`) has no
 string-derivable parent.
 

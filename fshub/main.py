@@ -87,14 +87,13 @@ def config_gen():
 
 @cli.command()
 @click.argument('path')
-@click.option('--use-index', is_flag=True, help='Write indexed snapshot output.')
 @click.option(
     '--skip-path',
     'skip_paths',
     multiple=True,
     help='Skip this path and everything under it. Repeat for multiple paths.',
 )
-def scan(path, use_index, skip_paths):
+def scan(path, skip_paths):
     """Scan a directory and save a snapshot."""
     if not (platform.system() == 'Windows' and path == '/') and not os.path.isdir(path):
         raise click.ClickException(f'Not a directory: {path}')
@@ -113,7 +112,6 @@ def scan(path, use_index, skip_paths):
         try:
             result = run_scan_to_snapshot(
                 path,
-                use_index=use_index,
                 counters={},
                 result_callback=reporter.update,
                 skip_prefixes=skip_paths,
@@ -123,7 +121,7 @@ def scan(path, use_index, skip_paths):
     finally:
         reporter.finish(result['counters'] if 'result' in locals() else None)
 
-    click.echo(f"Snapshot saved to {result['result_path']}")
+    click.echo(f"Snapshot {result['snapshot_id']} saved to {result['snapshot_path']}")
     click.echo(f"Scan log saved as {result['scan_log']}")
     click.echo(
         "Scanned "
@@ -138,6 +136,77 @@ def scan(path, use_index, skip_paths):
     )
     if skip_paths:
         click.echo(f"Skipped prefixes: {', '.join(skip_paths)}")
+
+
+def _snapshot_writer(snapshot_id):
+    """Open the writer for one snapshot directory."""
+    if __package__ in (None, ""):
+        from fshub.config import get_config
+        from fshub.snapshot import SnapshotWriter
+    else:
+        from .config import get_config
+        from .snapshot import SnapshotWriter
+    return SnapshotWriter(os.path.join(get_config().snapshot_dir, snapshot_id))
+
+
+@cli.command()
+@click.argument('snapshot_id')
+def rescan(snapshot_id):
+    """Rescan a snapshot's scope and store only what changed."""
+    if __package__ in (None, ""):
+        from fshub.scanning import run_incremental_scan
+    else:
+        from .scanning import run_incremental_scan
+
+    reporter = ScanProgressReporter()
+    result = None
+    try:
+        try:
+            result = run_incremental_scan(
+                snapshot_id, counters={}, result_callback=reporter.update)
+        except OSError as e:
+            raise click.ClickException(f'Rescan failed: {e}') from e
+    finally:
+        reporter.finish(result['counters'] if result else None)
+
+    if result['changed_count'] == 0:
+        click.echo(f"No changes; {snapshot_id} stays at generation "
+                   f"{result['snapshot_generation']}")
+        return
+    click.echo(f"Stored {result['changed_count']} changed directories as "
+               f"generation {result['snapshot_generation']}")
+    click.echo(f"Scan log saved as {result['scan_log']}")
+
+
+@cli.command()
+@click.argument('snapshot_id')
+def compact(snapshot_id):
+    """Fold a snapshot's increments back into a new base."""
+    writer = _snapshot_writer(snapshot_id)
+    with writer:
+        tree = writer.compact()
+    if tree is None:
+        click.echo('Nothing to compact')
+        return
+    click.echo(f"Compacted into a base of {len(tree['data'])} records "
+               f"({tree['digest']})")
+
+
+@cli.command()
+@click.argument('snapshot_id')
+@click.option('--min-age', default=3600, show_default=True,
+              help='Never delete files younger than this many seconds.')
+@click.option('--keep-revisions', default=3, show_default=True,
+              help='How many recent revisions stay readable for slow readers.')
+def gc(snapshot_id, min_age, keep_revisions):
+    """Delete payload files no live revision depends on."""
+    writer = _snapshot_writer(snapshot_id)
+    with writer:
+        deleted = writer.collect_garbage(min_age=min_age,
+                                         keep_revisions=keep_revisions)
+    click.echo(f'Deleted {len(deleted)} files')
+    for name in deleted:
+        click.echo(f'  {name}')
 
 
 if __name__ == '__main__':
