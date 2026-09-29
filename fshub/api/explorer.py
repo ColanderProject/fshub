@@ -554,6 +554,51 @@ def _in_any_group(groups_dict, group_names, item_type, item_path):
     return False
 
 
+def _inherits_inclusion(groups_dict, filter_in, path, snapshot_os):
+    """True when ``path`` itself or an ancestor is selected as a directory.
+
+    Selecting a directory in filter_in selects its whole subtree - that is
+    what backup and hashing do. The browsing view has to agree, otherwise a
+    directory that is backed up completely is previewed as empty and its
+    contents disappear as soon as the user navigates into it.
+    """
+    if not filter_in:
+        return False
+
+    current = path
+    while current:
+        if _in_any_group(groups_dict, filter_in, 'd', current):
+            return True
+        parent = snapshot_dirname(current, snapshot_os=snapshot_os)
+        if parent == current:
+            return False
+        current = parent
+    return False
+
+
+def _filter_in_dirs(groups_dict, filter_in, snapshot_os):
+    """Directories that must stay walkable for a filter_in selection.
+
+    Every ancestor of a selected file or directory, plus the selected
+    directories themselves; without them a walk stops before it reaches the
+    selection.
+    """
+    dirs = set()
+    for group_name in filter_in:
+        group = groups_dict.get(group_name)
+        if not group:
+            continue
+        for item_path in list(group['d']) + list(group['f']):
+            parent = snapshot_dirname(item_path, snapshot_os=snapshot_os)
+            while parent:
+                if parent in dirs:
+                    break
+                dirs.add(parent)
+                parent = snapshot_dirname(parent, snapshot_os=snapshot_os)
+        dirs.update(group['d'])
+    return dirs
+
+
 def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
                         recursive_calc=False, entry=None):
     """Filter path content based on groups."""
@@ -563,14 +608,21 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
     data = entry['data']
     snapshot_os = data[0].get('os_name') if data else None
 
+    # Are we browsing inside a directory that filter_in selected whole?
+    inherited = _inherits_inclusion(groups_dict, filter_in, path_obj['p'], snapshot_os)
+    # Same for every subdirectory below, so computed once rather than per call.
+    walkable_dirs = (_filter_in_dirs(groups_dict, filter_in, snapshot_os)
+                     if recursive_calc else None)
+
     filtered_files = []
     for i, filename in enumerate(path_obj.get('f', [])):
         file_path = join_snapshot_path(path_obj['p'], filename, snapshot_os=snapshot_os)
 
         if _in_any_group(groups_dict, filter_out, 'f', file_path):
             continue
-        if filter_in and not _in_any_group(groups_dict, filter_in, 'f', file_path):
-            continue
+        if filter_in and not inherited:
+            if not _in_any_group(groups_dict, filter_in, 'f', file_path):
+                continue
 
         filtered_files.append(_file_entry(path_obj, i))
 
@@ -580,7 +632,11 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
 
         if _in_any_group(groups_dict, filter_out, 'd', dir_path):
             continue
-        if filter_in and not _in_any_group(groups_dict, filter_in, 'd', dir_path):
+
+        # A subtree is shown either because it was selected itself or because
+        # an ancestor was; both mean everything below it is included.
+        subdir_included = inherited or _in_any_group(groups_dict, filter_in, 'd', dir_path)
+        if filter_in and not subdir_included:
             continue
 
         dir_info = _dir_entry(path_obj, i)
@@ -591,7 +647,8 @@ def filter_path_content(path_obj, snapshot_filename, filter_in, filter_out,
             if recursive_calc:
                 totals = calculate_filtered_recursive_totals(
                     subdir_obj, snapshot_filename, filter_in, filter_out,
-                    entry=entry,
+                    entry=entry, all_included=subdir_included,
+                    filter_in_dirs=walkable_dirs,
                 )
                 _apply_totals(dir_info, *totals)
             else:
@@ -710,11 +767,23 @@ def filter_on_snapshot(path_obj, data, path_index, filter_in, filter_out, groups
 
 
 def calculate_filtered_recursive_totals(path_obj, snapshot_filename, filter_in, filter_out,
-                                        entry=None):
+                                        entry=None, all_included=False, filter_in_dirs=None):
+    """Total one subtree the way backup and hashing would select it.
+
+    ``all_included`` says the subtree was selected as a whole (filter_out
+    still applies). The walkable-directory set is passed on as well, so a
+    directory holding a selected descendant is not cut off from it. Callers
+    totalling many siblings should compute ``filter_in_dirs`` once and pass it.
+    """
     entry = entry or _snapshot_view(snapshot_filename, copy_groups=True) or EMPTY_SNAPSHOT
+    if filter_in_dirs is None:
+        data = entry['data']
+        snapshot_os = data[0].get('os_name') if data else None
+        filter_in_dirs = _filter_in_dirs(entry['groups'], filter_in, snapshot_os)
     return filter_on_snapshot(
         path_obj, entry['data'], entry['index'],
         filter_in, filter_out, entry['groups'], None,
+        dirinFilterSet=filter_in_dirs, allIncluded=all_included,
     )
 
 
@@ -731,19 +800,7 @@ def get_filtered_files(snapshot_filename, filter_in, filter_out):
 
     # Every ancestor of a selected file or directory must stay walkable,
     # otherwise the recursion stops before it reaches the selection.
-    dirinFilterSet = set()
-    for group_name in filter_in:
-        group = groups_dict.get(group_name)
-        if not group:
-            continue
-        for item_path in list(group['d']) + list(group['f']):
-            parent = snapshot_dirname(item_path, snapshot_os=snapshot_os)
-            while parent:
-                if parent in dirinFilterSet:
-                    break
-                dirinFilterSet.add(parent)
-                parent = snapshot_dirname(parent, snapshot_os=snapshot_os)
-        dirinFilterSet.update(group['d'])
+    dirinFilterSet = _filter_in_dirs(groups_dict, filter_in, snapshot_os)
 
     filtered_files = []
     filter_on_snapshot(

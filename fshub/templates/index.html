@@ -417,8 +417,9 @@
                             <input type="number" class="form-control" id="backup-zip-compress" min="0" max="9" value="6">
                         </div>
                         <div class="col-md-6">
-                            <label for="max-zip-size" class="form-label">Max ZIP file size (MB):</label>
+                            <label for="max-zip-size" class="form-label">Split volumes every (MB of source data):</label>
                             <input type="number" class="form-control" id="max-zip-size" min="1" value="100">
+                            <div class="form-text">Counted in uncompressed source bytes. Compressed volumes are usually smaller; a single file larger than this is written on its own.</div>
                         </div>
                     </div>
                     <button class="btn btn-primary me-2" id="dry-run-zip">Preview ZIP</button>
