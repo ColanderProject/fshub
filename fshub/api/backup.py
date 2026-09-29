@@ -31,6 +31,13 @@ backup_lock = threading.Lock()
 FINISHED = ('completed', 'completed_with_errors', 'error', 'cancelled')
 MAX_FINISHED_TASKS = 50
 MAX_REPORTED_ERRORS = 20
+# Volume quota for split zip runs, counted in *uncompressed source bytes*, not
+# in archive bytes: a member's compressed size is only known once it has been
+# written, so honouring an exact archive-size limit would need a temporary
+# volume and a repack. Deflate makes the archive smaller than this budget for
+# compressible data; for incompressible data expect the source size plus a few
+# dozen bytes of header per entry. A single file larger than the quota is
+# always written on its own and can exceed it.
 DEFAULT_MAX_FILE_SIZE = 100 * 1024 * 1024
 COPY_BUFFER = 1024 * 1024
 STAGE_MEMORY_LIMIT = 8 * COPY_BUFFER
@@ -203,6 +210,10 @@ def _prepare_backup(data, backup_type):
         return None, ({'error': 'snapshot_filename must be a non-empty string'}, 400)
     if not isinstance(target_path, str) or not target_path:
         return None, ({'error': 'target_path must be a non-empty string'}, 400)
+
+    for field in ('backup_target_name', 'backup_name'):
+        if field in data and not isinstance(data[field], str):
+            return None, ({'error': f'{field} must be a string'}, 400)
 
     dry_run = data.get('dry_run', False)
     if not isinstance(dry_run, bool):
@@ -403,7 +414,8 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                         files_processed += 1
                         continue
 
-                    # Start a new archive rather than blowing past the limit.
+                    # Start a new archive rather than blowing past the budget.
+                    # Source bytes, see DEFAULT_MAX_FILE_SIZE for why.
                     if chunk_size > 0 and chunk_size + file_size > max_file_size:
                         break
 
@@ -422,7 +434,10 @@ def perform_zip_backup(task_id, files_to_backup, target_path, compress_level,
                             with open(source_path, 'rb') as src:
                                 shutil.copyfileobj(src, staged, COPY_BUFFER)
                             staged.seek(0)
-                            with zipf.open(arcname, 'w') as dst:
+                            # force_zip64: zipfile only learns the real size
+                            # when the entry is closed and otherwise raises
+                            # RuntimeError above 2 GiB, aborting the run.
+                            with zipf.open(arcname, 'w', force_zip64=True) as dst:
                                 shutil.copyfileobj(staged, dst, COPY_BUFFER)
                     except OSError as e:
                         _record(task_id, log, source_path, zip_filename, file_size, e)

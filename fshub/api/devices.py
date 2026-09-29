@@ -126,6 +126,34 @@ def _device_key(device):
     return None
 
 
+def _is_hardware_mac(mac):
+    """True for a real, globally administered unicast MAC address.
+
+    uuid.getnode() falls back to a random number with the multicast bit set
+    when no interface is found; such a value identifies nothing.
+    """
+    if not isinstance(mac, str):
+        return False
+    parts = mac.split(':')
+    if len(parts) != 6:
+        return False
+    try:
+        octets = [int(part, 16) for part in parts]
+    except ValueError:
+        return False
+    return not octets[0] & 0x03 and any(octets)
+
+
+def _same_machine(device, current_info):
+    """Host name and hardware MAC both match: the thumbprint merely rotated."""
+    host = current_info.get('host_name')
+    mac = current_info.get('mac_addr')
+    return (isinstance(host, str) and host and device.get('host_name') == host
+            and _is_hardware_mac(mac)
+            and isinstance(device.get('mac_addr'), str)
+            and device['mac_addr'].lower() == mac.lower())
+
+
 @device_bp.route('/api/v1/devices', methods=['GET'])
 def get_devices():
     """Get all devices"""
@@ -141,7 +169,14 @@ def get_devices():
             best[key] = (order, device)
 
     current_info = get_system_info()
-    current_known = _device_key(current_info) in best
+    # The thumbprint mixes in volatile fields (kernel release, CPU string), so
+    # it changes on an OS update even though the machine did not. A host name
+    # alone is no identity (think "localhost" or "raspberrypi"), so the
+    # fallback only counts a record whose host name *and* hardware MAC both
+    # match. Anything less and a new machine would be hidden as "known".
+    current_known = _device_key(current_info) in best or any(
+        _same_machine(device, current_info) for _order, device in best.values()
+    )
 
     return jsonify({
         'devices': [device for _order, device in best.values()],
